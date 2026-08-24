@@ -1,3127 +1,4847 @@
-# -*- coding: utf-8 -*-
-import telebot
-from telebot import util
-import subprocess
-import os
-import zipfile
-import tempfile
-import shutil
-from telebot import types
-import time
-from datetime import datetime, timedelta
-import psutil
-import sqlite3
+#TAHMID CODEX
+
+from __future__ import annotations
+
+import asyncio
+import html
 import json
 import logging
-import signal
-import threading
-import re
-import sys
-import atexit
-import requests
-import io
-from urllib.parse import urlparse
-import urllib3
+import os
 import random
-try:
-    from flask import Flask, request
-except ImportError:
-    Flask = None
-    request = None
+import re
+import secrets
+import string
+import time
+from datetime import datetime, timedelta
 
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import aiosqlite
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.request import HTTPXRequest
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
-# --- Configuration ---
-TOKEN = '8937605213:AAH6BXJ6v8RvUOjhdFFf5aEP70t8Ih10ZnE'  # <-- Yahan apna Telegram bot token paste karo
-OWNER_ID = int(os.environ.get('OWNER_ID', '7981498656'))
-ADMIN_ID = int(os.environ.get('ADMIN_ID', str(OWNER_ID)))
-YOUR_USERNAME = os.environ.get('OWNER_USERNAME', '@ARMAAN_x7x')
-if not TOKEN or TOKEN == 'PASTE_YOUR_BOT_TOKEN_HERE':
-    raise RuntimeError('Bot token set karo: TOKEN = \'PASTE_YOUR_BOT_TOKEN_HERE\' ko apne token se replace karo.')
 
-# Required subscription channels are managed from the Admin Panel.
-REQUIRED_CHANNELS = []
-
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-UPLOAD_BOTS_DIR = os.path.join(BASE_DIR, 'upload_bots')
-IROTECH_DIR = os.path.join(BASE_DIR, 'inf')
-DATABASE_PATH = os.path.join(IROTECH_DIR, 'bot_data.db')
-
-FREE_USER_LIMIT = 3
-SUBSCRIBED_USER_LIMIT = 15
-ADMIN_LIMIT = 999
-OWNER_LIMIT = float('inf')
-
-os.makedirs(UPLOAD_BOTS_DIR, exist_ok=True)
-os.makedirs(IROTECH_DIR, exist_ok=True)
-
-bot = telebot.TeleBot(TOKEN)
-
-# Telegram button styling: primary = blue.
-# Requires a recent pyTelegramBotAPI version with Bot API button styles.
-def primary_inline_button(text, **kwargs):
-    # Use Bot API button styling when supported; otherwise fall back safely.
-    try:
-        return types.InlineKeyboardButton(text, style="primary", **kwargs)
-    except (TypeError, AttributeError):
-        return types.InlineKeyboardButton(text, **kwargs)
-
-def primary_reply_button(text, **kwargs):
-    # Reply-keyboard styles are not supported by every pyTelegramBotAPI release.
-    try:
-        return types.KeyboardButton(text, style="primary", **kwargs)
-    except (TypeError, AttributeError):
-        return types.KeyboardButton(text, **kwargs)
-
-bot_scripts = {}
-user_subscriptions = {}
-user_files = {}
-active_users = set()
-admin_ids = {ADMIN_ID, OWNER_ID}
-user_custom_limits = {}
-bot_locked = False
-banned_users = set()
-
-# Auto-recovery tracking
-auto_recovery_last_restart = {}
-
-# --- Persistent uptime across restarts ---
-PERSISTENT_START_FILE = os.path.join(IROTECH_DIR, 'bot_start_time.txt')
-
-def get_persistent_start_time():
-    if os.path.exists(PERSISTENT_START_FILE):
-        try:
-            with open(PERSISTENT_START_FILE, 'r') as f:
-                timestamp = f.read().strip()
-                return datetime.fromisoformat(timestamp)
-        except Exception as e:
-            logging.error(f"Failed to read persistent start time: {e}")
-    now = datetime.now()
-    try:
-        with open(PERSISTENT_START_FILE, 'w') as f:
-            f.write(now.isoformat())
-    except Exception as e:
-        logging.error(f"Failed to write persistent start time: {e}")
-    return now
-
-BOT_START_TIME = get_persistent_start_time()
-
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# ==================== SAMBANOVA AI CONFIGURATION ====================
-SAMBA_API_KEY = os.environ.get('SAMBA_API_KEY', 'e4502644-72e1-41bb-96df-e13aa741a6f9')
-SAMBA_URL = "https://api.sambanova.ai/v1/chat/completions"
-
-AVAILABLE_MODELS = {
-    'llama': 'Meta-Llama-3.3-70B-Instruct',
-    'deepseek': 'DeepSeek-V3.1',
-    'minimax': 'MiniMax-M2.7',
-    'gpt-oss': 'gpt-oss-120b'
-}
-DEFAULT_MODEL = 'llama'
-global_model = DEFAULT_MODEL
-# =====================================================================
-
-# --- Keyboard Layouts ---
-COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
-    ["💎 𝐔𝐩𝐝𝐚𝐭𝐞𝐬 𝐂𝐡𝐚𝐧𝐧𝐞𝐥"],
-    ["💠 Upload", "📂 𝐌𝐲 𝐅𝐢𝐥𝐞𝐬"],
-    ["⚡ 𝐁𝐨𝐭 𝐒𝐩𝐞𝐞𝐝", "💫 𝐒𝐭𝐚𝐭𝐮𝐬"],
-    ["🔄 𝐑𝐞𝐬𝐭𝐚𝐫𝐭", "🛑 𝐒𝐭𝐨𝐩"],
-    ["⚙️ Recommended Install", "🤖 𝐀𝐆𝐄𝐍𝐓"],
-    ["🌐 𝐆𝐈𝐓𝐇𝐔𝐁", "👑 𝐂𝐨𝐧𝐭𝐚𝐜𝐭 𝐎𝐰𝐧𝐞𝐫"]
-]
-ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
-    ["💎 𝐔𝐩𝐝𝐚𝐭𝐞𝐬 𝐂𝐡𝐚𝐧𝐧𝐞𝐥"],
-    ["💠 Upload", "📂 𝐌𝐲 𝐅𝐢𝐥𝐞𝐬"],
-    ["⚡ 𝐁𝐨𝐭 𝐒𝐩𝐞𝐞𝐝", "💫 𝐒𝐭𝐚𝐭𝐮𝐬"],
-    ["🔄 𝐑𝐞𝐬𝐭𝐚𝐫𝐭", "🛑 𝐒𝐭𝐨𝐩"],
-    ["💎 𝐒𝐮𝐛𝐬𝐜𝐫𝐢𝐩𝐭𝐢𝐨𝐧𝐬", "📣 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭"],
-    ["🔐 𝐋𝐨𝐜𝐤 𝐁𝐨𝐭", "🟢 𝐑𝐮𝐧𝐧𝐢𝐧𝐠 𝐀𝐥𝐥 𝐂𝐨𝐝𝐞"],
-    ["🛠️ 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥", "⚙️ Recommended Install"],
-    ["🤖 𝐀𝐆𝐄𝐍𝐓", "🌐 𝐆𝐈𝐓𝐇𝐔𝐁"],
-    ["📞 𝐂𝐨𝐧𝐭𝐚𝐜𝐭 𝐎𝐰𝐧𝐞𝐫"]
-]
-
-# --- Customizable user button labels ---
-BUTTON_LABEL_DEFAULTS = {
-    'updates': '💎 𝐔𝐩𝐝𝐚𝐭𝐞𝐬 𝐂𝐡𝐚𝐧𝐧𝐞𝐥',
-    'upload': '💠 Upload',
-    'my_files': '📂 𝐌𝐲 𝐅𝐢𝐥𝐞𝐬',
-    'speed': '⚡ 𝐁𝐨𝐭 𝐒𝐩𝐞𝐞𝐝',
-    'status': '💫 𝐒𝐭𝐚𝐭𝐮𝐬',
-    'restart': '🔄 𝐑𝐞𝐬𝐭𝐚𝐫𝐭',
-    'stop': '🛑 𝐒𝐭𝐨𝐩',
-    'subscription': '💎 𝐒𝐮𝐛𝐬𝐜𝐫𝐢𝐩𝐭𝐢𝐨𝐧𝐬',
-    'broadcast': '📣 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭',
-    'lock': '🔐 𝐋𝐨𝐜𝐤 𝐁𝐨𝐭',
-    'run_all': '🟢 𝐑𝐮𝐧𝐧𝐢𝐧𝐠 𝐀𝐥𝐥 𝐂𝐨𝐝𝐞',
-    'admin': '🛠️ 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥',
-    'recommended': '⚙️ Recommended Install',
-    'ai': '🤖 𝐀𝐆𝐄𝐍𝐓',
-    'github': '🌐 𝐆𝐈𝐓𝐇𝐔𝐁',
-    'contact': '👑 𝐂𝐨𝐧𝐭𝐚𝐜𝐭 𝐎𝐰𝐧𝐞𝐫',
-}
-BUTTON_LABEL_NAMES = {
-    'updates': '📢 Updates Channel', 'upload': '🌏 Upload', 'my_files': '📁 My Files',
-    'speed': '⚡ Bot Speed', 'status': '🚀 Status', 'restart': '🔄 Restart',
-    'stop': '🛑 Stop', 'subscription': '💎 Subscriptions', 'broadcast': '📣 Broadcast',
-    'lock': '🔒 Lock Bot', 'run_all': '🟢 Run All Code', 'admin': '🛠️ Admin Panel',
-    'recommended': '⚙️ Recommended Install', 'ai': '🤖 AI Assistant',
-    'github': '🌐 GitHub', 'contact': '📞 Contact Owner',
-}
-button_labels = dict(BUTTON_LABEL_DEFAULTS)
-
-def get_button_label(button_id):
-    return button_labels.get(button_id, BUTTON_LABEL_DEFAULTS.get(button_id, button_id))
-
-def save_button_label(button_id, label):
-    label = label.strip()
-    if not label:
-        return False
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO button_labels (button_id, label) VALUES (?, ?)', (button_id, label))
-        conn.commit()
-        conn.close()
-    button_labels[button_id] = label
-    return True
-
-# --- Database Setup ---
-DB_LOCK = threading.Lock()
-
-def upgrade_db():
-    conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(pending_uploads)")
-    columns = [col[1] for col in c.fetchall()]
-    if 'extra_info' not in columns:
-        c.execute("ALTER TABLE pending_uploads ADD COLUMN extra_info TEXT")
-        logger.info("Added extra_info column to pending_uploads")
-    c.execute('''CREATE TABLE IF NOT EXISTS user_limits (
-        user_id INTEGER PRIMARY KEY,
-        custom_limit INTEGER
-    )''')
-    conn.commit()
-    conn.close()
-
-def init_db():
-    logger.info(f"Initializing database at: {DATABASE_PATH}")
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, expiry TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_files (user_id INTEGER, file_name TEXT, file_type TEXT, PRIMARY KEY (user_id, file_name))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS active_users (user_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS pending_uploads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER, file_id TEXT, file_name TEXT, file_type TEXT,
-            file_size INTEGER, user_name TEXT, user_username TEXT,
-            timestamp TEXT, extra_info TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS verified_users (user_id INTEGER PRIMARY KEY, verified_at TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS banned_users (user_id INTEGER PRIMARY KEY, banned_at TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_limits (user_id INTEGER PRIMARY KEY, custom_limit INTEGER)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS required_channels (channel TEXT PRIMARY KEY, added_at TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS button_labels (button_id TEXT PRIMARY KEY, label TEXT NOT NULL)''')
-        c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (OWNER_ID,))
-        if ADMIN_ID != OWNER_ID:
-            c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (ADMIN_ID,))
-        conn.commit()
-        conn.close()
-        upgrade_db()
-    except Exception as e:
-        logger.error(f"Database init error: {e}")
-
-def load_data():
-    global banned_users, user_custom_limits
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('SELECT user_id, expiry FROM subscriptions')
-        for user_id, expiry in c.fetchall():
-            try:
-                user_subscriptions[user_id] = {'expiry': datetime.fromisoformat(expiry)}
-            except ValueError:
-                pass
-        c.execute('SELECT user_id, file_name, file_type FROM user_files')
-        for user_id, file_name, file_type in c.fetchall():
-            user_files.setdefault(user_id, []).append((file_name, file_type))
-        c.execute('SELECT user_id FROM active_users')
-        active_users.update(row[0] for row in c.fetchall())
-        c.execute('SELECT user_id FROM admins')
-        admin_ids.update(row[0] for row in c.fetchall())
-        c.execute('SELECT user_id FROM banned_users')
-        banned_users = set(row[0] for row in c.fetchall())
-        c.execute('SELECT user_id, custom_limit FROM user_limits')
-        user_custom_limits = {row[0]: row[1] for row in c.fetchall()}
-        c.execute('SELECT channel FROM required_channels ORDER BY added_at ASC')
-        REQUIRED_CHANNELS.clear()
-        REQUIRED_CHANNELS.extend(row[0] for row in c.fetchall())
-        c.execute('SELECT button_id, label FROM button_labels')
-        for button_id, label in c.fetchall():
-            if button_id in BUTTON_LABEL_DEFAULTS and label:
-                button_labels[button_id] = label
-        conn.close()
-    except Exception as e:
-        logger.error(f"Data load error: {e}")
-
-init_db()
-load_data()
-
-# --- stylish_text ---
-def stylish_text(text: str) -> str:
-    text = re.sub(r'</?code>', '', text)
-    text = re.sub(r'<[^>]+>', '', text)
-    mapping = {
-        'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ', 'g': 'ɢ',
-        'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
-        'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 'ꜱ', 't': 'ᴛ', 'u': 'ᴜ',
-        'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
-        'A': 'A', 'B': 'B', 'C': 'C', 'D': 'D', 'E': 'E', 'F': 'F', 'G': 'G',
-        'H': 'H', 'I': 'I', 'J': 'J', 'K': 'K', 'L': 'L', 'M': 'M', 'N': 'N',
-        'O': 'O', 'P': 'P', 'Q': 'Q', 'R': 'R', 'S': 'S', 'T': 'T', 'U': 'U',
-        'V': 'V', 'W': 'W', 'X': 'X', 'Y': 'Y', 'Z': 'Z'
-    }
-    return ''.join(mapping.get(ch, ch) for ch in text)
-
-# --- Ban / Unban ---
-def ban_user(user_id):
-    if user_id in admin_ids or user_id == OWNER_ID:
-        return False
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO banned_users (user_id, banned_at) VALUES (?, ?)', (user_id, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-        banned_users.add(user_id)
-        return True
-    except:
-        return False
-
-def unban_user(user_id):
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('DELETE FROM banned_users WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        banned_users.discard(user_id)
-        return True
-    except:
-        return False
-
-def is_user_banned(user_id):
-    return user_id in banned_users
-
-# --- Custom Limit Management ---
-def set_user_custom_limit(user_id, limit):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO user_limits (user_id, custom_limit) VALUES (?, ?)', (user_id, limit))
-        conn.commit()
-        conn.close()
-        user_custom_limits[user_id] = limit
-
-def remove_user_custom_limit(user_id):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('DELETE FROM user_limits WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        if user_id in user_custom_limits:
-            del user_custom_limits[user_id]
-
-def get_user_file_limit(user_id):
-    if user_id in user_custom_limits:
-        return user_custom_limits[user_id]
-    if user_id == OWNER_ID:
-        return OWNER_LIMIT
-    if user_id in admin_ids:
-        return ADMIN_LIMIT
-    if user_id in user_subscriptions and user_subscriptions[user_id]['expiry'] > datetime.now():
-        return SUBSCRIBED_USER_LIMIT
-    return FREE_USER_LIMIT
-
-def get_user_file_count(user_id):
-    return len(user_files.get(user_id, []))
-
-# --- Dynamic required-channel management ---
-def normalize_channel(value):
-    value = value.strip()
-    if not value:
-        return None
-    if value.startswith('https://t.me/'):
-        value = '@' + value.rstrip('/').split('/')[-1]
-    if value.startswith('t.me/'):
-        value = '@' + value.rstrip('/').split('/')[-1]
-    if value.startswith('@'):
-        name = value[1:].strip()
-        if re.fullmatch(r'[A-Za-z0-9_]{5,32}', name):
-            return '@' + name
-        return None
-    if re.fullmatch(r'-100\d{5,20}', value):
-        return value
-    return None
-
-def get_required_channels():
-    return list(REQUIRED_CHANNELS)
-
-def add_required_channel(channel):
-    channel = normalize_channel(channel)
-    if not channel:
-        return False, 'Invalid channel. Use @channelusername or -100xxxxxxxxxx.'
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO required_channels (channel, added_at) VALUES (?, ?)', (channel, datetime.now().isoformat()))
-        changed = c.rowcount > 0
-        conn.commit()
-        conn.close()
-        if changed and channel not in REQUIRED_CHANNELS:
-            REQUIRED_CHANNELS.append(channel)
-        return changed, ('Channel added.' if changed else 'Channel already exists.')
-    except Exception as e:
-        logger.exception('add_required_channel failed')
-        return False, f'Database error: {e}'
-
-def remove_required_channel(channel):
-    channel = normalize_channel(channel) or channel.strip()
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('DELETE FROM required_channels WHERE channel = ?', (channel,))
-        changed = c.rowcount > 0
-        conn.commit()
-        conn.close()
-        if changed:
-            try: REQUIRED_CHANNELS.remove(channel)
-            except ValueError: pass
-        return changed
-    except Exception:
-        logger.exception('remove_required_channel failed')
-        return False
-
-def create_channel_management_panel():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.row(primary_inline_button('➕ Add Channel', callback_data='channel_add'), primary_inline_button('➖ Remove Channel', callback_data='channel_remove'))
-    markup.row(primary_inline_button('📋 List Channels', callback_data='channel_list'))
-    markup.row(primary_inline_button('🔙 Back to Admin', callback_data='admin_panel'))
-    return markup
-
-def process_add_required_channel(message):
-    if message.from_user.id not in admin_ids: return
-    if message.text.strip().lower() == '/cancel':
-        bot.reply_to(message, stylish_text('Cancelled.')); return
-    channel = normalize_channel(message.text)
-    if not channel:
-        bot.reply_to(message, stylish_text('Invalid channel. Send @channelusername or -100xxxxxxxxxx.\n/cancel')); return
-    changed, result = add_required_channel(channel)
-    bot.reply_to(message, stylish_text(('✅ ' if changed else 'ℹ️ ') + result))
-
-def process_remove_required_channel(message):
-    if message.from_user.id not in admin_ids: return
-    if message.text.strip().lower() == '/cancel':
-        bot.reply_to(message, stylish_text('Cancelled.')); return
-    channel = normalize_channel(message.text) or message.text.strip()
-    if remove_required_channel(channel):
-        bot.reply_to(message, stylish_text(f'✅ Removed {channel}.'))
-    else:
-        bot.reply_to(message, stylish_text('❌ Channel not found.'))
-
-# --- Channel verification ---
-def is_user_verified(user_id):
-    if user_id in admin_ids or user_id == OWNER_ID:
-        return True
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('SELECT 1 FROM verified_users WHERE user_id = ?', (user_id,))
-        result = c.fetchone() is not None
-        conn.close()
-        return result
-    except:
-        return False
-
-def set_user_verified(user_id):
-    try:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO verified_users (user_id, verified_at) VALUES (?, ?)', (user_id, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
-
-def is_user_member_all_channels(user_id):
-    if user_id in admin_ids or user_id == OWNER_ID:
-        return True
-    for channel in REQUIRED_CHANNELS:
-        try:
-            chat_member = bot.get_chat_member(channel, user_id)
-            if chat_member.status not in ['member', 'administrator', 'creator']:
-                return False
-        except:
-            return False
-    return True
-
-def send_join_prompt(chat_id, user_id):
-    text = (
-        "🔐 Jᴏɪɴ Aʟʟ Cʜᴀɴɴᴇʟs Tᴏ Uɴʟᴏᴄᴋ Tʜᴇ Bᴏᴛ 🚀\n"
-        "📢 Cᴏᴍᴘʟᴇᴛᴇ Aʟʟ Cʜᴀɴɴᴇʟ Jᴏɪɴs Tᴏ Gᴇᴛ Aᴄᴄᴇss ✅\n"
-        "⚡ Aғᴛᴇʀ Jᴏɪɴɪɴɢ, Cʟɪᴄᴋ \"Vᴇʀɪғʏ\" Tᴏ Cᴏɴᴛɪɴᴜᴇ. 🔓"
+def _load_token() -> str:
+    token = os.environ.get("BOT_TOKEN")
+    if token:
+        return token.strip()
+    token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token.txt")
+    if os.path.exists(token_file):
+        with open(token_file, "r", encoding="utf-8") as f:
+            t = f.read().strip()
+            if t:
+                return t
+    raise RuntimeError(
+        "No bot token found. Set BOT_TOKEN env var, or create a token.txt "
+        "file next to main.py containing your bot token."
     )
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for ch in REQUIRED_CHANNELS:
-        markup.add(primary_inline_button("CLICK", url=f"https://t.me/{ch.lstrip('@')}"))
-    markup.add(primary_inline_button("✅ VERIFY", callback_data=f"verify_channel_{user_id}"))
-    bot.send_message(chat_id, text, parse_mode=None, reply_markup=markup, disable_web_page_preview=True)
 
-def check_subscription_and_continue(message=None, call=None):
-    user_id = (message.from_user.id if message else call.from_user.id)
-    chat_id = (message.chat.id if message else call.message.chat.id)
-    if is_user_banned(user_id):
-        bot.send_message(chat_id, stylish_text("🚫 You are banned from using this bot."))
-        return False
-    if user_id in admin_ids or user_id == OWNER_ID:
-        return True
-    if is_user_verified(user_id):
-        return True
-    if is_user_member_all_channels(user_id):
-        set_user_verified(user_id)
-        return True
-    else:
-        send_join_prompt(chat_id, user_id)
-        return False
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('verify_channel_'))
-def verify_channel_callback(call):
-    user_id = int(call.data.split('_')[-1])
-    if user_id != call.from_user.id:
-        bot.answer_callback_query(call.id, stylish_text("This verification is not for you."), show_alert=True)
+BOT_TOKEN = "8834449405:AAGqoX_Bn1_QUpAeBMlh8TFAANYRVR70490"
+OWNER_ID = int(os.environ.get("OWNER_ID", "7981498656"))
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "ARMAANxFILExSTORExBOT")
+BOT_VERSION = "v15.0"
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.db")
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("")
+
+DEFAULT_SETTINGS = {
+    "bot_name": "FILE STORE BOT",
+    "referral_reward": "20",
+    "daily_bonus": "25",
+    "premium_daily_bonus_multiplier": "2",
+    "premium_daily_bonus": "40",
+    "support_username": "ARMAAN_x7x",
+    "payment_username": "ARMAAN_x7x",
+    "force_join": "1",
+    "maintenance": "0",
+    "star_rate": "30",
+    "coin_packages": json.dumps([
+        {"coins": 100, "stars": 3},
+        {"coins": 500, "stars": 15},
+        {"coins": 1000, "stars": 28},
+        {"coins": 2500, "stars": 65},
+        {"coins": 5000, "stars": 120},
+    ]),
+    "premium_pricing": json.dumps([
+        {"days": 7, "price": 300},
+        {"days": 30, "price": 900},
+        {"days": 90, "price": 2200},
+        {"days": 0, "price": 6000},
+    ]),
+    "coin_rate_bdt": "5",
+    "bdt_payment_details": "bKash (Send Money): 01XXXXXXXXX\nNagad (Send Money): 01XXXXXXXXX",
+    "spin_settings": json.dumps({
+        "chance_coins_low": 50,
+        "chance_coins_high": 25,
+        "chance_file": 10,
+        "chance_premium": 15,
+        "coins_low_min": 20,
+        "coins_low_max": 140,
+        "coins_high_min": 150,
+        "coins_high_max": 300,
+        "premium_days": 7,
+    }),
+    "mystery_box_pricing": json.dumps([
+        {"tier": "random", "label": "🎁 Random File", "price": 100},
+        {"tier": "rare", "label": "💎 Rare File", "price": 500},
+        {"tier": "premium", "label": "👑 Premium Project", "price": 1000},
+    ]),
+    "referral_milestones": json.dumps([
+        {"count": 5, "reward": 100},
+        {"count": 10, "reward": 250},
+        {"count": 25, "reward": 700},
+        {"count": 50, "reward": 1500},
+    ]),
+    "streak_rewards": json.dumps([
+        {"days": 3, "reward": 30},
+        {"days": 7, "reward": 100},
+        {"days": 14, "reward": 250},
+        {"days": 30, "reward": 600},
+    ]),
+}
+
+FILE_TYPE_ICON = {
+    "document": "📄", "video": "🎬", "audio": "🎵", "photo": "🖼",
+    "voice": "🎙", "animation": "🎞", "video_note": "🎥",
+}
+
+USE_CUSTOM_EMOJI = False
+CUSTOM_EMOJI: dict[str, str] = {
+}
+
+DIVIDER = "───────────────────"
+
+
+_db_lock = asyncio.Lock()
+
+
+DUPLICATE_COOLDOWN_SECONDS = 0.6
+FLOOD_WINDOW_SECONDS = 3.0
+FLOOD_MAX_ACTIONS = 12
+
+_last_action_by_key: dict[tuple[int, str], float] = {}
+_recent_action_times: dict[int, list[float]] = {}
+
+_user_action_locks: dict[int, asyncio.Lock] = {}
+_user_action_locks_guard = asyncio.Lock()
+
+
+async def get_user_action_lock(user_id: int) -> asyncio.Lock:
+    async with _user_action_locks_guard:
+        lock = _user_action_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _user_action_locks[user_id] = lock
+        return lock
+
+
+async def group_restriction_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if chat is None or chat.type == "private":
         return
-    if is_user_verified(user_id):
-        bot.answer_callback_query(call.id, stylish_text("You are already verified."), show_alert=True)
-        bot.edit_message_text(stylish_text("✅ You are already verified. You can now use the bot."),
-                              call.message.chat.id, call.message.message_id)
-        return
-    if is_user_member_all_channels(user_id):
-        set_user_verified(user_id)
-        bot.answer_callback_query(call.id, stylish_text("✅ Verification successful! You can now use the bot."), show_alert=True)
-        bot.edit_message_text(stylish_text("✅ Verification successful! You can now use the bot.\nSend /start to begin."),
-                              call.message.chat.id, call.message.message_id)
+
+    if update.callback_query:
+        is_bot_trigger = True
     else:
-        missing = []
-        for ch in REQUIRED_CHANNELS:
+        msg = update.message
+        if msg is None or not msg.text:
+            return
+        is_bot_trigger = msg.text.startswith("/") or msg.text in TEXT_ROUTES
+
+    if not is_bot_trigger:
+        return
+
+    try:
+        await update.effective_message.reply_text("📩 Please Use this bot in Bot DM.")
+    except TelegramError:
+        pass
+    raise ApplicationHandlerStop
+
+
+async def flood_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None:
+        return
+
+    if update.callback_query:
+        action_id = update.callback_query.data or ""
+    elif update.message and update.message.text:
+        action_id = update.message.text
+    else:
+        return
+
+    now = time.monotonic()
+
+    key = (user.id, action_id)
+    last_same = _last_action_by_key.get(key, 0.0)
+    _last_action_by_key[key] = now
+    if now - last_same < DUPLICATE_COOLDOWN_SECONDS:
+        if update.callback_query:
             try:
-                member = bot.get_chat_member(ch, user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    missing.append(ch)
-            except:
-                missing.append(ch)
-        if missing:
-            missing_list = "\n".join(missing)
-            bot.answer_callback_query(call.id, stylish_text(f"❌ You are not a member of:\n{missing_list}\nPlease join all channels first."), show_alert=True)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("❌ Verification failed. Please join all channels and try again."), show_alert=True)
+                await update.callback_query.answer()
+            except TelegramError:
+                pass
+        raise ApplicationHandlerStop
 
-# --- Helper Functions ---
-def get_user_folder(user_id):
-    user_folder = os.path.join(UPLOAD_BOTS_DIR, str(user_id))
-    os.makedirs(user_folder, exist_ok=True)
-    return user_folder
+    history = _recent_action_times.setdefault(user.id, [])
+    history[:] = [t for t in history if now - t < FLOOD_WINDOW_SECONDS]
+    history.append(now)
+    if len(history) > FLOOD_MAX_ACTIONS:
+        if update.callback_query:
+            try:
+                await update.callback_query.answer("⏳ Please slow down a little.", show_alert=False)
+            except TelegramError:
+                pass
+        raise ApplicationHandlerStop
 
-def is_bot_running(script_owner_id, file_name):
-    script_key = f"{script_owner_id}_{file_name}"
-    script_info = bot_scripts.get(script_key)
-    if script_info and script_info.get('process'):
-        try:
-            proc = psutil.Process(script_info['process'].pid)
-            is_running = proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
-            if not is_running:
-                if 'log_file' in script_info and hasattr(script_info['log_file'], 'close') and not script_info['log_file'].closed:
-                    try: script_info['log_file'].close()
-                    except: pass
-                if script_key in bot_scripts: del bot_scripts[script_key]
-            return is_running
-        except psutil.NoSuchProcess:
-            if 'log_file' in script_info and hasattr(script_info['log_file'], 'close') and not script_info['log_file'].closed:
-                try: script_info['log_file'].close()
-                except: pass
-            if script_key in bot_scripts: del bot_scripts[script_key]
+
+class RateLimiter:
+    def __init__(self, rate: float):
+        self.interval = 1.0 / rate
+        self._lock = asyncio.Lock()
+        self._next_time = time.monotonic()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._next_time - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next_time = now + self.interval
+
+
+TELEGRAM_SEND_LIMITER = RateLimiter(25)
+
+DB_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", "64"))
+_db_pool: "asyncio.Queue[aiosqlite.Connection]" = None
+
+
+async def init_db_pool() -> None:
+    global _db_pool
+    _db_pool = asyncio.Queue(maxsize=DB_POOL_SIZE)
+    for _ in range(DB_POOL_SIZE):
+        conn = await aiosqlite.connect(DB_PATH)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode = WAL;")
+        await conn.execute("PRAGMA synchronous = NORMAL;")
+        await conn.execute("PRAGMA busy_timeout = 8000;")
+        await conn.execute("PRAGMA foreign_keys = ON;")
+        await _db_pool.put(conn)
+    log.info("DB connection pool ready (%d connections)", DB_POOL_SIZE)
+
+
+async def close_db_pool() -> None:
+    if _db_pool is None:
+        return
+    while not _db_pool.empty():
+        conn = await _db_pool.get()
+        await conn.close()
+
+
+class _PooledConnection:
+    """Async context manager — borrows a connection from the shared pool
+    instead of opening a new one. Drop-in replacement for
+    `aiosqlite.connect(DB_PATH)` at every call site."""
+
+    async def __aenter__(self) -> aiosqlite.Connection:
+        self.conn = await _db_pool.get()
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await _db_pool.put(self.conn)
+
+
+def db_conn() -> _PooledConnection:
+    return _PooledConnection()
+
+
+async def init_db() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                join_date TEXT,
+                is_banned INTEGER DEFAULT 0,
+                referred_by INTEGER,
+                last_bonus_time TEXT,
+                last_seen TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS files (
+                file_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_file_id TEXT NOT NULL,
+                tg_file_unique_id TEXT,
+                file_kind TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                description TEXT DEFAULT '',
+                price INTEGER DEFAULT 0,
+                upload_date TEXT,
+                downloads_count INTEGER DEFAULT 0,
+                uploaded_by INTEGER,
+                premium_only INTEGER DEFAULT 0,
+                is_deleted INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS wallet (
+                user_id INTEGER PRIMARY KEY,
+                coins INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS transactions (
+                tx_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                tx_type TEXT,
+                amount INTEGER,
+                description TEXT,
+                timestamp TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS payments (
+                payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                stars INTEGER,
+                coins INTEGER,
+                screenshot_file_id TEXT,
+                status TEXT DEFAULT 'pending',
+                admin_id INTEGER,
+                reason TEXT,
+                timestamp TEXT,
+                payment_method TEXT DEFAULT 'stars',
+                amount_bdt INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS redeems (
+                code TEXT PRIMARY KEY,
+                coin_reward INTEGER DEFAULT 0,
+                premium_days INTEGER DEFAULT 0,
+                usage_limit INTEGER DEFAULT 0,
+                used_count INTEGER DEFAULT 0,
+                expiry_date TEXT,
+                status TEXT DEFAULT 'active',
+                created_by INTEGER,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS redeem_uses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT,
+                user_id INTEGER,
+                timestamp TEXT,
+                UNIQUE(code, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                new_user_id INTEGER UNIQUE,
+                date TEXT,
+                reward INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS force_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                chat_id INTEGER,
+                title TEXT,
+                invite_link TEXT,
+                chat_type TEXT,
+                added_date TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                added_date TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                file_pk INTEGER,
+                timestamp TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS premium (
+                user_id INTEGER PRIMARY KEY,
+                expiry_date TEXT,
+                is_lifetime INTEGER DEFAULT 0,
+                granted_by INTEGER,
+                granted_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                file_pk INTEGER,
+                price INTEGER,
+                timestamp TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                subject TEXT,
+                body TEXT,
+                status TEXT DEFAULT 'open',
+                admin_id INTEGER,
+                created_at TEXT,
+                closed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER,
+                action_text TEXT,
+                timestamp TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS file_requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                request_text TEXT,
+                status TEXT DEFAULT 'open',
+                timestamp TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(is_deleted);
+            CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_purchases_user_file ON purchases(user_id, file_pk);
+            CREATE INDEX IF NOT EXISTS idx_downloads_user ON downloads(user_id);
+            """
+        )
+        await db.commit()
+
+        migrations = [
+            ("files", "premium_only", "INTEGER DEFAULT 0"),
+            ("payments", "payment_method", "TEXT DEFAULT 'stars'"),
+            ("payments", "amount_bdt", "INTEGER"),
+            ("redeems", "source", "TEXT DEFAULT 'admin'"),
+            ("admins", "role", "TEXT DEFAULT 'junior'"),
+            ("users", "login_streak", "INTEGER DEFAULT 0"),
+            ("users", "last_login_date", "TEXT"),
+            ("users", "referral_milestone_reached", "INTEGER DEFAULT 0"),
+            ("force_channels", "chat_type", "TEXT"),
+            ("force_channels", "invite_link", "TEXT"),
+            ("users", "spin_count_today", "INTEGER DEFAULT 0"),
+            ("users", "spin_reset_date", "TEXT"),
+            ("files", "mystery_tier", "TEXT"),
+            ("files", "featured", "INTEGER DEFAULT 0"),
+        ]
+        for table, column, coltype in migrations:
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+                await db.commit()
+                log.info("Migrated: added %s.%s", table, column)
+            except aiosqlite.OperationalError:
+                pass
+
+        for k, v in DEFAULT_SETTINGS.items():
+            await db.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v)
+            )
+        await db.execute(
+            "INSERT OR IGNORE INTO admins (user_id, added_date) VALUES (?, ?)",
+            (OWNER_ID, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+    log.info("Database ready at %s", DB_PATH)
+
+
+
+async def get_setting(key: str, default: str = "") -> str:
+    async with db_conn() as db:
+        cur = await db.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = await cur.fetchone()
+        return row[0] if row else default
+
+
+async def set_setting(key: str, value: str) -> None:
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        await db.commit()
+
+
+
+async def ensure_user(user_id: int, username: str | None, first_name: str | None,
+                       referred_by: int | None = None) -> bool:
+    """Returns True if this is a newly created user."""
+    async with db_conn() as db:
+        cur = await db.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+        exists = await cur.fetchone()
+        now = datetime.utcnow().isoformat()
+        if exists:
+            await db.execute(
+                "UPDATE users SET username=?, first_name=?, last_seen=? WHERE user_id=?",
+                (username, first_name, now, user_id),
+            )
+            await db.commit()
             return False
-        except Exception as e:
-            logger.error(f"Error checking process {script_key}: {e}")
-            return False
+        await db.execute(
+            "INSERT INTO users (user_id, username, first_name, join_date, referred_by, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username, first_name, now, referred_by, now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO wallet (user_id, coins) VALUES (?, 0)", (user_id,)
+        )
+        await db.commit()
+        return True
+
+
+async def is_admin(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
+    async with db_conn() as db:
+        cur = await db.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
+        return (await cur.fetchone()) is not None
+
+
+async def is_banned(user_id: int) -> bool:
+    async with db_conn() as db:
+        cur = await db.execute("SELECT is_banned FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return bool(row and row[0])
+
+
+async def get_user_row(user_id: int):
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        return await cur.fetchone()
+
+
+
+async def get_balance(user_id: int) -> int:
+    async with db_conn() as db:
+        cur = await db.execute("SELECT coins FROM wallet WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if row is None:
+            await db.execute("INSERT OR IGNORE INTO wallet (user_id, coins) VALUES (?, 0)", (user_id,))
+            await db.commit()
+            return 0
+        return row[0]
+
+
+async def add_coins(user_id: int, amount: int, tx_type: str, description: str = "") -> int:
+    async with _db_lock:
+        async with db_conn() as db:
+            await db.execute(
+                "INSERT INTO wallet (user_id, coins) VALUES (?, 0) "
+                "ON CONFLICT(user_id) DO NOTHING", (user_id,)
+            )
+            await db.execute(
+                "UPDATE wallet SET coins = coins + ? WHERE user_id=?", (amount, user_id)
+            )
+            await db.execute(
+                "INSERT INTO transactions (user_id, tx_type, amount, description, timestamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, tx_type, amount, description, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            cur = await db.execute("SELECT coins FROM wallet WHERE user_id=?", (user_id,))
+            row = await cur.fetchone()
+            return row[0]
+
+
+async def remove_coins(user_id: int, amount: int, tx_type: str, description: str = "") -> bool:
+    """Returns False if insufficient balance."""
+    async with _db_lock:
+        async with db_conn() as db:
+            cur = await db.execute("SELECT coins FROM wallet WHERE user_id=?", (user_id,))
+            row = await cur.fetchone()
+            bal = row[0] if row else 0
+            if bal < amount:
+                return False
+            await db.execute(
+                "UPDATE wallet SET coins = coins - ? WHERE user_id=?", (amount, user_id)
+            )
+            await db.execute(
+                "INSERT INTO transactions (user_id, tx_type, amount, description, timestamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, tx_type, -amount, description, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return True
+
+
+
+async def get_premium(user_id: int):
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM premium WHERE user_id=?", (user_id,))
+        return await cur.fetchone()
+
+
+async def is_premium_active(user_id: int) -> bool:
+    row = await get_premium(user_id)
+    if not row:
+        return False
+    if row["is_lifetime"]:
+        return True
+    if row["expiry_date"] and datetime.fromisoformat(row["expiry_date"]) > datetime.utcnow():
+        return True
     return False
 
-def kill_process_tree(process_info):
-    try:
-        if 'log_file' in process_info and hasattr(process_info['log_file'], 'close') and not process_info['log_file'].closed:
-            try: process_info['log_file'].close()
-            except: pass
-        process = process_info.get('process')
-        if process and hasattr(process, 'pid'):
-            pid = process.pid
-            if pid:
-                try:
-                    parent = psutil.Process(pid)
-                    children = parent.children(recursive=True)
-                    for child in children:
-                        try: child.terminate()
-                        except: pass
-                    psutil.wait_procs(children, timeout=1)
-                    try:
-                        parent.terminate()
-                        try: parent.wait(timeout=1)
-                        except: parent.kill()
-                    except: pass
-                except psutil.NoSuchProcess:
-                    pass
-    except Exception as e:
-        logger.error(f"Error killing process tree: {e}")
 
-TELEGRAM_MODULES = {
-    'telebot': 'pyTelegramBotAPI',
-    'telegram': 'python-telegram-bot',
-    'python_telegram_bot': 'python-telegram-bot',
-    'aiogram': 'aiogram',
-    'pyrogram': 'pyrogram',
-    'telethon': 'telethon',
-    'telethon.sync': 'telethon',
-    'from telethon.sync import telegramclient': 'telethon',
-    'telepot': 'telepot',
-    'pytg': 'pytg',
-    'tgcrypto': 'tgcrypto',
-    'telegram_upload': 'telegram-upload',
-    'telegram_send': 'telegram-send',
-    'telegram_text': 'telegram-text',
-    'mtproto': 'telegram-mtproto',
-    'tl': 'telethon',
-    'telegram_utils': 'telegram-utils',
-    'telegram_logger': 'telegram-logger',
-    'telegram_handlers': 'python-telegram-handlers',
-    'telegram_redis': 'telegram-redis',
-    'telegram_sqlalchemy': 'telegram-sqlalchemy',
-    'telegram_payment': 'telegram-payment',
-    'telegram_shop': 'telegram-shop-sdk',
-    'pytest_telegram': 'pytest-telegram',
-    'telegram_debug': 'telegram-debug',
-    'telegram_scraper': 'telegram-scraper',
-    'telegram_analytics': 'telegram-analytics',
-    'telegram_nlp': 'telegram-nlp-toolkit',
-    'telegram_ai': 'telegram-ai',
-    'telegram_api': 'telegram-api-client',
-    'telegram_web': 'telegram-web-integration',
-    'telegram_games': 'telegram-games',
-    'telegram_quiz': 'telegram-quiz-bot',
-    'telegram_ffmpeg': 'telegram-ffmpeg',
-    'telegram_media': 'telegram-media-utils',
-    'telegram_2fa': 'telegram-twofa',
-    'telegram_crypto': 'telegram-crypto-bot',
-    'telegram_i18n': 'telegram-i18n',
-    'telegram_translate': 'telegram-translate',
-    'bs4': 'beautifulsoup4',
-    'requests': 'requests',
-    'pillow': 'Pillow',
-    'cv2': 'opencv-python',
-    'yaml': 'PyYAML',
-    'dotenv': 'python-dotenv',
-    'dateutil': 'python-dateutil',
-    'pandas': 'pandas',
-    'numpy': 'numpy',
-    'flask': 'Flask',
-    'django': 'Django',
-    'sqlalchemy': 'SQLAlchemy',
-    'asyncio': None,
-    'json': None,
-    'datetime': None,
-    'os': None,
-    'sys': None,
-    're': None,
-    'time': None,
-    'math': None,
-    'random': None,
-    'logging': None,
-    'threading': None,
-    'subprocess': None,
-    'zipfile': None,
-    'tempfile': None,
-    'shutil': None,
-    'sqlite3': None,
-    'psutil': 'psutil',
-    'atexit': None
-}
-
-def attempt_install_pip(module_name, message):
-    package_name = TELEGRAM_MODULES.get(module_name.lower(), module_name)
-    if package_name is None:
-        return False
-    try:
-        bot.reply_to(message, stylish_text(f"🐍 Installing {package_name}..."))
-        result = subprocess.run([sys.executable, '-m', 'pip', 'install', package_name], capture_output=True, text=True)
-        if result.returncode == 0:
-            bot.reply_to(message, stylish_text(f"✅ Package {package_name} installed."))
-            return True
-        else:
-            bot.reply_to(message, stylish_text(f"❌ Failed to install {package_name}."))
-            return False
-    except Exception as e:
-        bot.reply_to(message, stylish_text(f"❌ Install error: {e}"))
-        return False
-
-def attempt_install_npm(module_name, user_folder, message):
-    try:
-        bot.reply_to(message, stylish_text(f"🟠 Installing Node package {module_name}..."))
-        result = subprocess.run(['npm', 'install', module_name], cwd=user_folder, capture_output=True, text=True)
-        if result.returncode == 0:
-            bot.reply_to(message, stylish_text(f"✅ Node package {module_name} installed."))
-            return True
-        else:
-            bot.reply_to(message, stylish_text(f"❌ Failed to install {module_name}."))
-            return False
-    except Exception as e:
-        bot.reply_to(message, stylish_text(f"❌ NPM error: {e}"))
-        return False
-
-def run_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
-    max_attempts = 2
-    if attempt > max_attempts:
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Failed to run '{file_name}' after {max_attempts} attempts."))
-        return
-    script_key = f"{script_owner_id}_{file_name}"
-    logger.info(f"Attempt {attempt} to run Python: {script_path}")
-    try:
-        if not os.path.exists(script_path):
-            if message_obj_for_reply:
-                bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Script '{file_name}' not found!"))
-            remove_user_file_db(script_owner_id, file_name)
-            return
-        if attempt == 1:
-            check_proc = subprocess.Popen([sys.executable, script_path], cwd=user_folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                _, stderr = check_proc.communicate(timeout=5)
-                if check_proc.returncode != 0 and stderr:
-                    match = re.search(r"ModuleNotFoundError: No module named '(.+?)'", stderr)
-                    if match:
-                        module_name = match.group(1)
-                        if attempt_install_pip(module_name, message_obj_for_reply):
-                            if message_obj_for_reply:
-                                bot.reply_to(message_obj_for_reply, stylish_text(f"🔄 Retrying '{file_name}'..."))
-                            time.sleep(2)
-                            threading.Thread(target=run_script, args=(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt+1)).start()
-                            return
-                        else:
-                            if message_obj_for_reply:
-                                bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Missing module {module_name}. Install failed."))
-                            return
-            except subprocess.TimeoutExpired:
-                check_proc.kill()
-                check_proc.communicate()
-        log_file_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
-        log_file = open(log_file_path, 'w', encoding='utf-8')
-        process = subprocess.Popen([sys.executable, script_path], cwd=user_folder, stdout=log_file, stderr=log_file, stdin=subprocess.PIPE)
-        bot_scripts[script_key] = {
-            'process': process,
-            'log_file': log_file,
-            'file_name': file_name,
-            'chat_id': message_obj_for_reply.chat.id if message_obj_for_reply else None,
-            'script_owner_id': script_owner_id,
-            'start_time': datetime.now(),
-            'user_folder': user_folder,
-            'type': 'py',
-            'script_key': script_key
-        }
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"✅ Python script '{file_name}' started! (PID: {process.pid})"))
-    except Exception as e:
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Error: {e}"))
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-
-def run_js_script(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt=1):
-    max_attempts = 2
-    if attempt > max_attempts:
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Failed to run '{file_name}' after {max_attempts} attempts."))
-        return
-    script_key = f"{script_owner_id}_{file_name}"
-    logger.info(f"Attempt {attempt} to run JS: {script_path}")
-    try:
-        if not os.path.exists(script_path):
-            if message_obj_for_reply:
-                bot.reply_to(message_obj_for_reply, stylish_text(f"❌ JS script '{file_name}' not found!"))
-            remove_user_file_db(script_owner_id, file_name)
-            return
-        if attempt == 1:
-            check_proc = subprocess.Popen(['node', script_path], cwd=user_folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                _, stderr = check_proc.communicate(timeout=5)
-                if check_proc.returncode != 0 and stderr:
-                    match = re.search(r"Cannot find module '(.+?)'", stderr)
-                    if match:
-                        module_name = match.group(1)
-                        if not module_name.startswith('.') and not module_name.startswith('/'):
-                            if attempt_install_npm(module_name, user_folder, message_obj_for_reply):
-                                if message_obj_for_reply:
-                                    bot.reply_to(message_obj_for_reply, stylish_text(f"🔄 Retrying '{file_name}'..."))
-                                time.sleep(2)
-                                threading.Thread(target=run_js_script, args=(script_path, script_owner_id, user_folder, file_name, message_obj_for_reply, attempt+1)).start()
-                                return
-                            else:
-                                if message_obj_for_reply:
-                                    bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Missing Node module {module_name}."))
-                                return
-            except subprocess.TimeoutExpired:
-                check_proc.kill()
-                check_proc.communicate()
-        log_file_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
-        log_file = open(log_file_path, 'w', encoding='utf-8')
-        process = subprocess.Popen(['node', script_path], cwd=user_folder, stdout=log_file, stderr=log_file, stdin=subprocess.PIPE)
-        bot_scripts[script_key] = {
-            'process': process,
-            'log_file': log_file,
-            'file_name': file_name,
-            'chat_id': message_obj_for_reply.chat.id if message_obj_for_reply else None,
-            'script_owner_id': script_owner_id,
-            'start_time': datetime.now(),
-            'user_folder': user_folder,
-            'type': 'js',
-            'script_key': script_key
-        }
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"✅ JS script '{file_name}' started! (PID: {process.pid})"))
-    except Exception as e:
-        if message_obj_for_reply:
-            bot.reply_to(message_obj_for_reply, stylish_text(f"❌ Error: {e}"))
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-
-# --- Database Operations ---
-def save_user_file(user_id, file_name, file_type='py'):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('INSERT OR REPLACE INTO user_files (user_id, file_name, file_type) VALUES (?, ?, ?)',
-                      (user_id, file_name, file_type))
-            conn.commit()
-            user_files.setdefault(user_id, [])
-            user_files[user_id] = [(fn, ft) for fn, ft in user_files[user_id] if fn != file_name]
-            user_files[user_id].append((file_name, file_type))
-        except Exception as e:
-            logger.error(f"Error saving file: {e}")
-        finally:
-            conn.close()
-
-def remove_user_file_db(user_id, file_name):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('DELETE FROM user_files WHERE user_id = ? AND file_name = ?', (user_id, file_name))
-            conn.commit()
-            if user_id in user_files:
-                user_files[user_id] = [f for f in user_files[user_id] if f[0] != file_name]
-                if not user_files[user_id]:
-                    del user_files[user_id]
-        except Exception as e:
-            logger.error(f"Error removing file: {e}")
-        finally:
-            conn.close()
-
-def add_active_user(user_id):
-    active_users.add(user_id)
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('INSERT OR IGNORE INTO active_users (user_id) VALUES (?)', (user_id,))
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error adding active user: {e}")
-        finally:
-            conn.close()
-
-def save_subscription(user_id, expiry):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            expiry_str = expiry.isoformat()
-            c.execute('INSERT OR REPLACE INTO subscriptions (user_id, expiry) VALUES (?, ?)', (user_id, expiry_str))
-            conn.commit()
-            user_subscriptions[user_id] = {'expiry': expiry}
-        except Exception as e:
-            logger.error(f"Error saving subscription: {e}")
-        finally:
-            conn.close()
-
-def remove_subscription_db(user_id):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('DELETE FROM subscriptions WHERE user_id = ?', (user_id,))
-            conn.commit()
-            if user_id in user_subscriptions:
-                del user_subscriptions[user_id]
-        except Exception as e:
-            logger.error(f"Error removing subscription: {e}")
-        finally:
-            conn.close()
-
-def add_admin_db(admin_id):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (admin_id,))
-            conn.commit()
-            admin_ids.add(admin_id)
-        except Exception as e:
-            logger.error(f"Error adding admin: {e}")
-        finally:
-            conn.close()
-
-def remove_admin_db(admin_id):
-    if admin_id == OWNER_ID:
-        return False
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('DELETE FROM admins WHERE user_id = ?', (admin_id,))
-            conn.commit()
-            if c.rowcount > 0:
-                admin_ids.discard(admin_id)
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error removing admin: {e}")
-            return False
-        finally:
-            conn.close()
-
-def add_pending_upload(user_id, file_id, file_name, file_type, file_size, user_name, user_username, extra_info=""):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            timestamp = datetime.now().isoformat()
-            c.execute('''INSERT INTO pending_uploads 
-                         (user_id, file_id, file_name, file_type, file_size, user_name, user_username, timestamp, extra_info)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                      (user_id, file_id, file_name, file_type, file_size, user_name, user_username, timestamp, extra_info))
-            conn.commit()
-            return c.lastrowid
-        except Exception as e:
-            logger.error(f"Error adding pending upload: {e}")
-            return None
-        finally:
-            conn.close()
-
-def get_pending_upload(upload_id):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('SELECT id, user_id, file_id, file_name, file_type, file_size, user_name, user_username, extra_info FROM pending_uploads WHERE id = ?', (upload_id,))
-            row = c.fetchone()
-            if row:
-                return {'id': row[0], 'user_id': row[1], 'file_id': row[2], 'file_name': row[3],
-                        'file_type': row[4], 'file_size': row[5], 'user_name': row[6], 'user_username': row[7], 'extra_info': row[8]}
-            return None
-        except Exception as e:
-            logger.error(f"Error getting pending upload: {e}")
-            return None
-        finally:
-            conn.close()
-
-def delete_pending_upload(upload_id):
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        c = conn.cursor()
-        try:
-            c.execute('DELETE FROM pending_uploads WHERE id = ?', (upload_id,))
-            conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting pending upload: {e}")
-            return False
-        finally:
-            conn.close()
-
-def process_approved_file(upload_id, admin_chat_id, user_message_obj=None):
-    pending = get_pending_upload(upload_id)
-    if not pending:
-        bot.send_message(admin_chat_id, stylish_text(f"❌ Pending upload {upload_id} not found."))
-        return False
-    user_id = pending['user_id']
-    file_id = pending['file_id']
-    file_name = pending['file_name']
-    file_ext = os.path.splitext(file_name)[1].lower()
-    file_type = pending['file_type']
-    file_limit = get_user_file_limit(user_id)
-    current_files = get_user_file_count(user_id)
-    if current_files >= file_limit:
-        limit_str = str(file_limit) if file_limit != float('inf') else "Unlimited"
-        bot.send_message(admin_chat_id, stylish_text(f"⚠️ User limit reached ({current_files}/{limit_str}). Cannot approve."))
-        delete_pending_upload(upload_id)
-        return False
-    try:
-        file_info = bot.get_file(file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        user_folder = get_user_folder(user_id)
-        if file_ext == '.zip':
-            temp_dir = tempfile.mkdtemp(prefix=f"user_{user_id}_zip_")
-            zip_path = os.path.join(temp_dir, file_name)
-            with open(zip_path, 'wb') as f:
-                f.write(downloaded)
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                z.extractall(temp_dir)
-            extracted = os.listdir(temp_dir)
-            py_files = [f for f in extracted if f.endswith('.py')]
-            js_files = [f for f in extracted if f.endswith('.js')]
-            req_file = 'requirements.txt' if 'requirements.txt' in extracted else None
-            pkg_json = 'package.json' if 'package.json' in extracted else None
-            if req_file:
-                try:
-                    subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', os.path.join(temp_dir, req_file)], check=True, capture_output=True)
-                    bot.send_message(admin_chat_id, stylish_text("✅ Python deps installed."))
-                except Exception as e:
-                    bot.send_message(admin_chat_id, stylish_text(f"❌ Python deps failed: {e}"))
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    delete_pending_upload(upload_id)
-                    return False
-            if pkg_json:
-                try:
-                    subprocess.run(['npm', 'install'], cwd=temp_dir, check=True, capture_output=True)
-                    bot.send_message(admin_chat_id, stylish_text("✅ Node deps installed."))
-                except Exception as e:
-                    bot.send_message(admin_chat_id, stylish_text(f"❌ Node deps failed: {e}"))
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    delete_pending_upload(upload_id)
-                    return False
-            main_script = None
-            for p in ['main.py', 'bot.py', 'app.py']:
-                if p in py_files:
-                    main_script = p
-                    file_type = 'py'
-                    break
-            if not main_script:
-                for p in ['index.js', 'main.js', 'bot.js', 'app.js']:
-                    if p in js_files:
-                        main_script = p
-                        file_type = 'js'
-                        break
-            if not main_script and py_files:
-                main_script = py_files[0]
-                file_type = 'py'
-            elif not main_script and js_files:
-                main_script = js_files[0]
-                file_type = 'js'
-            if not main_script:
-                bot.send_message(admin_chat_id, stylish_text("❌ No .py or .js script found in zip."))
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                delete_pending_upload(upload_id)
-                return False
-            for item in os.listdir(temp_dir):
-                src = os.path.join(temp_dir, item)
-                dst = os.path.join(user_folder, item)
-                if os.path.isdir(dst):
-                    shutil.rmtree(dst)
-                elif os.path.exists(dst):
-                    os.remove(dst)
-                shutil.move(src, dst)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            save_user_file(user_id, main_script, file_type)
-            script_path = os.path.join(user_folder, main_script)
-            if file_type == 'py':
-                threading.Thread(target=run_script, args=(script_path, user_id, user_folder, main_script, user_message_obj)).start()
-            else:
-                threading.Thread(target=run_js_script, args=(script_path, user_id, user_folder, main_script, user_message_obj)).start()
-            bot.send_message(admin_chat_id, stylish_text(f"✅ Approved and started: {main_script}"))
-            return True
-        else:
-            file_path = os.path.join(user_folder, file_name)
-            with open(file_path, 'wb') as f:
-                f.write(downloaded)
-            save_user_file(user_id, file_name, file_type)
-            if file_type == 'py':
-                threading.Thread(target=run_script, args=(file_path, user_id, user_folder, file_name, user_message_obj)).start()
-            else:
-                threading.Thread(target=run_js_script, args=(file_path, user_id, user_folder, file_name, user_message_obj)).start()
-            bot.send_message(admin_chat_id, stylish_text(f"✅ Approved and started: {file_name}"))
-            return True
-    except Exception as e:
-        logger.error(f"Error in process_approved_file: {e}", exc_info=True)
-        bot.send_message(admin_chat_id, stylish_text(f"❌ Error: {e}"))
-        return False
-    finally:
-        delete_pending_upload(upload_id)
-
-# --- Document Handler ---
-@bot.message_handler(content_types=['document'])
-def handle_file_upload_doc(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    doc = message.document
-    if bot_locked and user_id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Bot locked, cannot accept files."))
-        return
-    file_limit = get_user_file_limit(user_id)
-    current_files = get_user_file_count(user_id)
-    if current_files >= file_limit:
-        limit_str = str(file_limit) if file_limit != float('inf') else "Unlimited"
-        bot.reply_to(message, stylish_text(f"⚠️ File limit ({current_files}/{limit_str}) reached."))
-        return
-    file_name = doc.file_name
-    if not file_name:
-        bot.reply_to(message, stylish_text("⚠️ No file name."))
-        return
-    file_ext = os.path.splitext(file_name)[1].lower()
-    if file_ext not in ['.py', '.js', '.zip']:
-        bot.reply_to(message, stylish_text("⚠️ Only .py, .js, .zip allowed."))
-        return
-    if doc.file_size > 20 * 1024 * 1024:
-        bot.reply_to(message, stylish_text("⚠️ File too large (max 20MB)."))
-        return
-    user_name = message.from_user.first_name
-    user_username = message.from_user.username or "No username"
-    upload_id = add_pending_upload(
-        user_id=user_id,
-        file_id=doc.file_id,
-        file_name=file_name,
-        file_type=file_ext[1:],
-        file_size=doc.file_size,
-        user_name=user_name,
-        user_username=user_username,
-        extra_info=""
-    )
-    if not upload_id:
-        bot.reply_to(message, stylish_text("❌ Internal error, please try later."))
-        return
-    bot.reply_to(message, stylish_text(f"✅ File {file_name} submitted for admin approval. You will be notified when approved or rejected."))
-    for admin_id in admin_ids:
-        try:
-            caption = (f"📥 New file requires approval\n"
-                       f"👤 User: {user_name} (@{user_username})\n"
-                       f"🆔 User ID: {user_id}\n"
-                       f"📄 File: {file_name}\n"
-                       f"📏 Size: {doc.file_size // 1024} KB\n"
-                       f"🆔 Upload ID: {upload_id}")
-            sent = bot.send_document(admin_id, doc.file_id, caption=stylish_text(caption))
-            markup = types.InlineKeyboardMarkup()
-            markup.add(
-                primary_inline_button("✅ Approve", callback_data=f"approve_upload_{upload_id}"),
-                primary_inline_button("❌ Reject", callback_data=f"reject_upload_{upload_id}")
+async def grant_premium(user_id: int, days: int | None, admin_id: int) -> None:
+    async with db_conn() as db:
+        if days is None:
+            await db.execute(
+                "INSERT INTO premium (user_id, expiry_date, is_lifetime, granted_by, granted_at) "
+                "VALUES (?, NULL, 1, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "expiry_date=NULL, is_lifetime=1, granted_by=excluded.granted_by, granted_at=excluded.granted_at",
+                (user_id, admin_id, datetime.utcnow().isoformat()),
             )
-            bot.edit_message_reply_markup(admin_id, sent.message_id, reply_markup=markup)
-        except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id}: {e}")
-
-# --- Approval / Rejection Callback ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_upload_') or call.data.startswith('reject_upload_'))
-def handle_approval_callback(call):
-    if not check_subscription_and_continue(None, call):
-        return
-    admin_id = call.from_user.id
-    if admin_id not in admin_ids:
-        bot.answer_callback_query(call.id, stylish_text("⚠️ Only admins can approve/reject."), show_alert=True)
-        return
-    upload_id = int(call.data.split('_')[-1])
-    pending = get_pending_upload(upload_id)
-    if not pending:
-        bot.answer_callback_query(call.id, stylish_text("⚠️ This upload request no longer exists."), show_alert=True)
-        try:
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-        except: pass
-        return
-    user_id = pending['user_id']
-    file_name = pending['file_name']
-    if call.data.startswith('approve_upload_'):
-        bot.answer_callback_query(call.id, stylish_text("✅ Approving and starting..."))
-        success = process_approved_file(upload_id, admin_chat_id=call.message.chat.id, user_message_obj=call.message)
-        if success:
-            try:
-                bot.send_message(user_id, stylish_text(f"✅ Your file {file_name} has been approved and is now running."))
-            except Exception as e:
-                logger.error(f"Could not notify user {user_id}: {e}")
-            try:
-                bot.edit_message_caption(
-                    caption=stylish_text(call.message.caption + "\n\n✅ APPROVED"),
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    reply_markup=None
-                )
-            except: pass
         else:
-            bot.send_message(call.message.chat.id, stylish_text(f"❌ Failed to process file for user {user_id}."))
-    else:
-        bot.answer_callback_query(call.id, stylish_text("❌ Rejected."))
-        delete_pending_upload(upload_id)
-        reject_msg = "AGLI BAR SE YE FILE RUN MT KARNA SIR"
-        try:
-            bot.send_message(user_id, stylish_text(f"❌ Your file {file_name} was rejected by admin.\n\n{reject_msg}"))
-        except Exception as e:
-            logger.error(f"Could not notify user {user_id}: {e}")
-        try:
-            bot.edit_message_caption(
-                caption=stylish_text(call.message.caption + "\n\n❌ REJECTED"),
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=None
+            expiry = (datetime.utcnow() + timedelta(days=days)).isoformat()
+            await db.execute(
+                "INSERT INTO premium (user_id, expiry_date, is_lifetime, granted_by, granted_at) "
+                "VALUES (?, ?, 0, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "expiry_date=excluded.expiry_date, is_lifetime=0, granted_by=excluded.granted_by, granted_at=excluded.granted_at",
+                (user_id, expiry, admin_id, datetime.utcnow().isoformat()),
             )
-        except: pass
+        await db.commit()
 
-# ======================= GITHUB DEPLOY =======================
-def parse_github_url(url):
-    url = re.sub(r'\.git$', '', url)
-    if 'github.com' not in url:
-        raise ValueError("Not a valid GitHub URL")
-    parts = url.split('github.com/')[-1].split('/')
-    if len(parts) < 2:
-        raise ValueError("Invalid GitHub URL format")
-    owner = parts[0]
-    repo = parts[1]
-    branch = 'main'
-    if len(parts) >= 4 and parts[2] == 'tree':
-        branch = parts[3]
-    return owner, repo, branch
 
-def download_github_repo(owner, repo, branch, token=None):
-    url = f"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}"
-    headers = {}
-    if token:
-        headers['Authorization'] = f'token {token}'
-    resp = requests.get(url, headers=headers, stream=True)
-    if resp.status_code == 404:
-        raise Exception("Repository or branch not found")
-    if resp.status_code == 401:
-        raise Exception("Invalid or missing access token (private repo)")
-    if resp.status_code != 200:
-        raise Exception(f"GitHub API error: {resp.status_code}")
-    content_length = resp.headers.get('content-length')
-    if content_length and int(content_length) > 20 * 1024 * 1024:
-        raise Exception("Repository ZIP exceeds 20MB limit")
-    return resp.content
+async def remove_premium(user_id: int) -> None:
+    async with db_conn() as db:
+        await db.execute("DELETE FROM premium WHERE user_id=?", (user_id,))
+        await db.commit()
 
-github_data = {}
 
-def _logic_github_deploy(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if get_user_file_count(user_id) >= get_user_file_limit(user_id):
-        bot.reply_to(message, stylish_text("⚠️ You have reached your file limit. Delete some files first."))
-        return
-    github_data[user_id] = {'step': 'url'}
-    bot.reply_to(message, stylish_text("📦 Send me the GitHub repository URL.\nExample: https://github.com/user/repo\n\nSend /cancel to abort."))
 
-@bot.message_handler(func=lambda m: m.from_user.id in github_data and github_data[m.from_user.id]['step'] == 'url')
-def github_get_url(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if message.text and message.text.lower() == '/cancel':
-        del github_data[user_id]
-        bot.reply_to(message, stylish_text("❌ GitHub deploy cancelled."))
-        return
-    url = message.text.strip()
-    try:
-        owner, repo, branch = parse_github_url(url)
-    except Exception as e:
-        bot.reply_to(message, stylish_text(f"❌ Invalid GitHub URL: {e}"))
-        return
-    github_data[user_id]['url'] = url
-    github_data[user_id]['owner'] = owner
-    github_data[user_id]['repo'] = repo
-    github_data[user_id]['branch'] = branch
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        primary_inline_button("🔒 Private", callback_data=f"github_private_{user_id}"),
-        primary_inline_button("🌐 Public", callback_data=f"github_public_{user_id}")
-    )
-    bot.reply_to(message, stylish_text("Is this a private repository?"), reply_markup=markup)
+def user_reply_keyboard(admin: bool) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton("📁 Buy Files", style="primary"), KeyboardButton("💎 My Wallet", style="primary")],
+        [KeyboardButton("🎁 Daily Bonus", style="primary"), KeyboardButton("🎰 Daily Spin", style="success")],
+        [KeyboardButton("🎁 Mystery Box", style="success"), KeyboardButton("🚀 Invite Friends", style="primary")],
+        [KeyboardButton("🎟️ Redeem Code", style="primary"), KeyboardButton("📊 My Stats", style="primary")],
+        [KeyboardButton("🏆 Leaderboard", style="primary"), KeyboardButton("🎫 Support Ticket", style="primary")],
+        [KeyboardButton("💬 Support", style="primary")],
+    ]
+    if admin:
+        rows.append([KeyboardButton("👑 Admin Panel", style="primary")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('github_private_') or call.data.startswith('github_public_'))
-def github_repo_type(call):
-    user_id = int(call.data.split('_')[-1])
-    if call.from_user.id != user_id:
-        bot.answer_callback_query(call.id, "Not for you", show_alert=True)
-        return
-    if user_id not in github_data:
-        bot.answer_callback_query(call.id, "Session expired", show_alert=True)
-        return
-    if call.data.startswith('github_private_'):
-        github_data[user_id]['step'] = 'token'
-        bot.edit_message_text("🔑 Send your GitHub personal access token (with `repo` scope).\nSend /cancel to abort.",
-                              call.message.chat.id, call.message.message_id)
-    else:
-        github_data[user_id]['token'] = None
-        _process_github_download(call.message.chat.id, user_id)
-    bot.answer_callback_query(call.id)
 
-@bot.message_handler(func=lambda m: m.from_user.id in github_data and github_data[m.from_user.id].get('step') == 'token')
-def github_get_token(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if message.text and message.text.lower() == '/cancel':
-        del github_data[user_id]
-        bot.reply_to(message, stylish_text("❌ GitHub deploy cancelled."))
-        return
-    token = message.text.strip()
-    github_data[user_id]['token'] = token
-    _process_github_download(message.chat.id, user_id)
+def admin_reply_keyboard(is_owner: bool = True) -> ReplyKeyboardMarkup:
+    """Full admin control keyboard — replaces the user keyboard entirely while
+    the admin is inside the Admin Panel. Senior/Junior admins get a reduced
+    set — Force Channels and Settings are Owner-only sections. Requires
+    python-telegram-bot >= 22.7 (Bot API 9.4+) for `style` to render as
+    colored buttons in Telegram; see requirements.txt."""
+    admin_mgr_label = "🛡 Admin Manager" if is_owner else "📋 Admin List"
+    buttons = ["📤 Upload File", "📂 Manage Files", "💰 Wallet Manager", "🎟 Redeem Manager"]
+    if is_owner:
+        buttons += ["📡 Force Channels"]
+    buttons += ["📢 Broadcast", "👥 User Manager", "👤 All Users", "👑 Premium Manager", "📊 Statistics", "🛠 Maintenance"]
+    if is_owner:
+        buttons += ["⚙ Settings"]
+    buttons += [admin_mgr_label]
 
-def _process_github_download(chat_id, user_id):
-    data = github_data.get(user_id)
-    if not data:
-        bot.send_message(chat_id, stylish_text("Session expired. Start again."))
-        return
-    url = data['url']
-    owner = data['owner']
-    repo = data['repo']
-    branch = data['branch']
-    token = data.get('token')
-    
-    msg = bot.send_message(chat_id, stylish_text("📡 𝐄𝐒𝐓𝐀𝐁𝐋𝐈𝐒𝐇𝐈𝐍𝐆 𝐑𝐄𝐏𝐎 𝐋𝐈𝐍𝐊...\n\n[▓░░░░░░░░░] 10%"))
-    time.sleep(1.5)
-    bot.edit_message_text(stylish_text("📡 𝐄𝐒𝐓𝐀𝐁𝐋𝐈𝐒𝐇𝐈𝐍𝐆 𝐑𝐄𝐏𝐎 𝐋𝐈𝐍𝐊...\n\n[▓▓░░░░░░░░] 20%"), chat_id, msg.message_id)
-    time.sleep(1)
-    bot.edit_message_text(stylish_text("🔗 𝐑𝐄??𝐎 𝐂𝐎??𝐍𝐄𝐂𝐓𝐈𝐎𝐍...\n\n[▓▓▓░░░░░░░] 30%"), chat_id, msg.message_id)
-    time.sleep(1)
-    bot.edit_message_text(stylish_text("🌐 𝐂𝐎𝐍𝐍𝐄𝐂𝐓𝐈𝐍𝐆 𝐓𝐎 𝐑𝐄𝐏𝐎...\n\n[▓▓▓▓░░░░░░] 40%"), chat_id, msg.message_id)
-    time.sleep(0.8)
-    bot.edit_message_text(stylish_text("🌐 𝐂𝐎𝐍𝐍𝐄𝐂𝐓𝐈𝐍𝐆 𝐓𝐎 𝐑𝐄𝐏𝐎...\n\n[▓▓▓▓▓░░░░░] 55%"), chat_id, msg.message_id)
-    time.sleep(0.8)
-    bot.edit_message_text(stylish_text("🌐 𝐂𝐎𝐍𝐍𝐄𝐂𝐓𝐈𝐍𝐆 𝐓𝐎 𝐑𝐄𝐏𝐎...\n\n[▓▓▓▓▓▓▓░░░] 70%"), chat_id, msg.message_id)
-    time.sleep(0.8)
-    bot.edit_message_text(stylish_text("📥 𝐃𝐎𝐖𝐍𝐋𝐎𝐀𝐃𝐈𝐍𝐆 𝐑𝐄𝐏𝐎...\n\n[▓▓▓▓▓▓▓▓▓░] 90%"), chat_id, msg.message_id)
-    time.sleep(1)
-    bot.edit_message_text(stylish_text("📥 𝐃𝐎𝐖𝐍𝐋𝐎𝐀𝐃𝐈𝐍𝐆 𝐑𝐄𝐏𝐎...\n\n[▓▓▓▓▓▓▓▓▓▓] 100%"), chat_id, msg.message_id)
-    time.sleep(0.5)
-    
-    try:
-        zip_content = download_github_repo(owner, repo, branch, token)
-        bot.edit_message_text(stylish_text("✅ 𝐒𝐔𝐂𝐂𝐄𝐒𝐒𝐅𝐔𝐋\n\nRepository downloaded successfully. Submitting for admin approval..."), chat_id, msg.message_id)
-    except Exception as e:
-        bot.edit_message_text(stylish_text(f"❌ Download failed: {e}"), chat_id, msg.message_id)
-        del github_data[user_id]
-        return
-    
-    file_name = f"{repo}_{branch}.zip"
-    try:
-        sent = bot.send_document(chat_id, io.BytesIO(zip_content), visible_file_name=file_name, caption=stylish_text("🔄 Submitting for admin approval..."))
-        file_id = sent.document.file_id
-        file_size = sent.document.file_size
-        user_name = bot.get_chat(user_id).first_name
-        user_username = bot.get_chat(user_id).username or "No username"
-        extra_info = f"GitHub URL: {url}\nToken: {token if token else 'Not required (public repo)'}"
-        upload_id = add_pending_upload(
-            user_id=user_id,
-            file_id=file_id,
-            file_name=file_name,
-            file_type='zip',
-            file_size=file_size,
-            user_name=user_name,
-            user_username=user_username,
-            extra_info=extra_info
+    rows = [
+        [KeyboardButton(buttons[i], style="primary")] + (
+            [KeyboardButton(buttons[i + 1], style="primary")] if i + 1 < len(buttons) else []
         )
-        if not upload_id:
-            bot.send_message(chat_id, stylish_text("❌ Internal error, try again later."))
-            return
-        for admin_id in admin_ids:
-            try:
-                caption = (f"📥 New GitHub repo requires approval\n"
-                           f"👤 User: {user_name} (@{user_username})\n"
-                           f"🆔 User ID: {user_id}\n"
-                           f"📦 Repo URL: {url}\n"
-                           f"🔑 Token: {token if token else 'Public repo (no token)'}\n"
-                           f"📄 File: {file_name}\n"
-                           f"📏 Size: {file_size // 1024} KB\n"
-                           f"🆔 Upload ID: {upload_id}")
-                sent_admin = bot.send_document(admin_id, file_id, caption=stylish_text(caption))
-                markup = types.InlineKeyboardMarkup()
-                markup.add(
-                    primary_inline_button("✅ Approve", callback_data=f"approve_upload_{upload_id}"),
-                    primary_inline_button("❌ Reject", callback_data=f"reject_upload_{upload_id}")
-                )
-                bot.edit_message_reply_markup(admin_id, sent_admin.message_id, reply_markup=markup)
-            except Exception as e:
-                logger.error(f"Failed to notify admin {admin_id}: {e}")
-        bot.send_message(chat_id, stylish_text(f"✅ GitHub repository submitted for admin approval.\nYou will be notified when approved/rejected."))
-    except Exception as e:
-        bot.send_message(chat_id, stylish_text(f"❌ Failed to submit: {e}"))
-    finally:
-        del github_data[user_id]
+        for i in range(0, len(buttons), 2)
+    ]
+    rows.append([KeyboardButton("⬅️ Back to Main", style="primary")])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-# ======================= RECOMMENDED INSTALL =======================
-def _logic_recommended_install(message):
-    if not check_subscription_and_continue(message):
+
+def admin_panel_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("📤 Upload File", callback_data="ad:upload", style="primary"),
+         InlineKeyboardButton("📂 Manage Files", callback_data="ad:managefiles", style="primary")],
+        [InlineKeyboardButton("💰 Wallet Manager", callback_data="ad:walletmgr", style="primary"),
+         InlineKeyboardButton("🎟 Redeem Manager", callback_data="ad:redeemmgr", style="primary")],
+        [InlineKeyboardButton("📡 Force Channels", callback_data="ad:fcmgr", style="primary"),
+         InlineKeyboardButton("📢 Broadcast", callback_data="ad:broadcast", style="primary")],
+        [InlineKeyboardButton("👥 User Manager", callback_data="ad:usermgr", style="primary"),
+         InlineKeyboardButton("👑 Premium Manager", callback_data="ad:premiummgr", style="primary")],
+        [InlineKeyboardButton("📊 Statistics", callback_data="ad:stats", style="primary"),
+         InlineKeyboardButton("🛠 Maintenance", callback_data="ad:maintenance", style="primary")],
+        [InlineKeyboardButton("⚙ Settings", callback_data="ad:settings", style="primary"),
+         InlineKeyboardButton("🛡 Admin Manager", callback_data="ad:adminmgr", style="primary")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def back_button(cb: str = "ad:home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data=cb, style="primary")]])
+
+
+
+async def list_force_channels():
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM force_channels ORDER BY id")
+        return await cur.fetchall()
+
+
+async def check_force_join(bot, user_id: int) -> list[dict]:
+    """Returns list of channels the user has NOT joined."""
+    if (await get_setting("force_join", "1")) != "1":
+        return []
+    channels = await list_force_channels()
+    missing = []
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(chat_id=ch["chat_id"], user_id=user_id)
+            if member.status in ("left", "kicked"):
+                missing.append(dict(ch))
+        except TelegramError:
+            missing.append(dict(ch))
+    return missing
+
+
+async def send_force_join_prompt(update: Update, missing: list[dict]) -> None:
+    buttons = []
+    for ch in missing:
+        if ch.get("username"):
+            url = f"https://t.me/{ch['username'].lstrip('@')}"
+        elif ch.get("invite_link"):
+            url = ch["invite_link"]
+        else:
+            continue
+        buttons.append([InlineKeyboardButton(f"📢 {ch['title']}", url=url, style="primary")])
+    buttons.append([InlineKeyboardButton("✅ Verify", callback_data="verify_join", style="primary")])
+    text = (
+        "🔒 <b>Access Restricted</b>\n\n"
+        "To use this bot, please join all required channels below, "
+        "then tap <b>✅ Verify</b>."
+    )
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.effective_message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML
+        )
+
+
+
+(UP_FILE, UP_NAME, UP_DESC, UP_PRICE, UP_PREVIEW) = range(5)
+(BC_PKG, BC_STARS, BC_SCREENSHOT) = range(10, 13)
+(RD_CODE,) = range(20, 21)
+(FC_ADD,) = range(30, 31)
+(UM_SEARCH, UM_AMOUNT) = range(40, 42)
+(RM_CODE, RM_COINS, RM_PREMIUM, RM_LIMIT, RM_EXPIRY, RM_DELETE) = range(50, 56)
+(BR_CONTENT,) = range(60, 61)
+(ST_VALUE,) = range(70, 71)
+(EF_FIELD,) = range(80, 81)
+(WB_IDS, WB_ACTION, WB_AMOUNT, WB_PREMIUM) = range(90, 94)
+(BDT_AMOUNT, BDT_PROOF) = range(94, 96)
+(GC_AMOUNT,) = range(96, 97)
+(AM_ADD_USER, AM_ADD_ROLE) = range(97, 99)
+(TK_SUBJECT, TK_BODY, TK_REPLY, TK_USER_REPLY) = range(99, 103)
+(FR_TEXT,) = range(103, 104)
+(MF_SEARCH,) = range(104, 105)
+
+ADMIN_ONLY_MSG = "🚫 This action is for admins only."
+OWNER_ONLY_MSG = "🚫 This is restricted to the Owner only. Senior/Junior admins don't have access to this section."
+ADMIN_MAX_REDEEM_COINS = 300
+ADMIN_MIN_REDEEM_COINS = 20
+ADMIN_DAILY_REDEEM_LIMIT = 2
+
+
+async def require_owner(update: Update) -> bool:
+    """Gate for Owner-only sections (Settings, Force Channels, Payment approval,
+    Bulk User Manage, Manage Files list). Senior and Junior admins are both
+    blocked — only OWNER_ID passes. Sends a denial message/alert and returns
+    False if the caller isn't the owner."""
+    if update.effective_user.id == OWNER_ID:
+        return True
+    if update.callback_query:
+        await update.callback_query.answer(OWNER_ONLY_MSG, show_alert=True)
+    else:
+        await update.effective_message.reply_text(OWNER_ONLY_MSG)
+    return False
+
+
+def fmt_size(num: int) -> str:
+    step = 1024.0
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if num < step:
+            return f"{num:.1f} {unit}" if unit != "B" else f"{int(num)} {unit}"
+        num /= step
+    return f"{num:.1f} PB"
+
+
+def fmt_date(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso).strftime("%d %b %Y, %H:%M")
+    except Exception:
+        return iso
+
+
+
+async def _update_login_streak(bot, user_id: int) -> None:
+    """Increments a user's consecutive-day login streak (resets if a day was
+    missed), and grants a one-time bonus whenever a configured streak
+    milestone is newly reached. Cheap no-op on repeat calls within the same
+    day since guard_user runs on every interaction."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    async with db_conn() as db:
+        cur = await db.execute("SELECT login_streak, last_login_date FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row:
+            return
+        streak, last_date = row[0] or 0, row[1]
+        if last_date == today:
+            return
+
+        yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+        new_streak = streak + 1 if last_date == yesterday else 1
+        await db.execute(
+            "UPDATE users SET login_streak=?, last_login_date=? WHERE user_id=?", (new_streak, today, user_id)
+        )
+        await db.commit()
+
+    rewards = json.loads(await get_setting("streak_rewards", "[]"))
+    for r in rewards:
+        if r["days"] == new_streak:
+            await add_coins(user_id, r["reward"], "login_streak", f"{new_streak}-day login streak bonus")
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"🔥 <b>{new_streak}-Day Login Streak!</b>\n\n🪙 Bonus: <b>+{r['reward']} Coins</b>\n\nKeep it going!",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
+            break
+
+
+async def guard_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True if the update should proceed normally."""
+    user = update.effective_user
+    if user is None:
+        return False
+
+    await ensure_user(user.id, user.username, user.first_name)
+    await _update_login_streak(context.bot, user.id)
+
+    admin = await is_admin(user.id)
+
+    maintenance = (await get_setting("maintenance", "0")) == "1"
+    if maintenance and not admin:
+        await update.effective_message.reply_text(
+            "🚧 <b>Bot is under maintenance.</b>\nPlease try again later.",
+            parse_mode=ParseMode.HTML,
+        )
+        return False
+
+    if await is_banned(user.id):
+        await update.effective_message.reply_text(
+            "🚫 You have been banned from using this bot. Contact support if you think this is a mistake."
+        )
+        return False
+
+    if not admin:
+        missing = await check_force_join(context.bot, user.id)
+        if missing:
+            await send_force_join_prompt(update, missing)
+            return False
+
+    return True
+
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    args = context.args
+
+    maintenance = (await get_setting("maintenance", "0")) == "1"
+    admin = await is_admin(user.id)
+    if maintenance and not admin:
+        await update.effective_message.reply_text(
+            "🚧 <b>Bot is under maintenance.</b>\nPlease try again later.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if await is_banned(user.id):
+        await update.effective_message.reply_text("🚫 You have been banned from using this bot.")
+        return
+
+    referred_by = None
+    if args and args[0].isdigit():
+        ref_id = int(args[0])
+        if ref_id != user.id:
+            existing = await get_user_row(user.id)
+            if existing is None:
+                referred_by = ref_id
+
+    is_new = await ensure_user(user.id, user.username, user.first_name, referred_by)
+
+    if not admin:
+        missing = await check_force_join(context.bot, user.id)
+        if missing:
+            await send_force_join_prompt(update, missing)
+            return
+
+    await maybe_process_referral(context.bot, user.id)
+
+    await show_main_menu(update, context)
+
+
+async def maybe_process_referral(bot, user_id: int) -> None:
+    """Grants the referral reward once the referred user actually reaches the
+    bot (i.e. after passing force-join, or immediately if none is required).
+    Safe to call repeatedly — process_referral() is idempotent."""
+    row = await get_user_row(user_id)
+    if row and row["referred_by"]:
+        await process_referral(bot, row["referred_by"], user_id)
+
+
+async def process_referral(bot, referrer_id: int, new_user_id: int) -> None:
+    async with db_conn() as db:
+        cur = await db.execute("SELECT 1 FROM users WHERE user_id=?", (referrer_id,))
+        if not await cur.fetchone():
+            return
+        cur = await db.execute("SELECT 1 FROM referrals WHERE new_user_id=?", (new_user_id,))
+        if await cur.fetchone():
+            return
+        reward = int(await get_setting("referral_reward", "20"))
+        await db.execute(
+            "INSERT INTO referrals (referrer_id, new_user_id, date, reward) VALUES (?, ?, ?, ?)",
+            (referrer_id, new_user_id, datetime.utcnow().isoformat(), reward),
+        )
+        await db.commit()
+
+    new_balance = await add_coins(referrer_id, reward, "referral", f"Referral bonus for inviting user {new_user_id}")
+
+    new_user_row = await get_user_row(new_user_id)
+    if new_user_row and new_user_row["username"]:
+        uname = f"@{new_user_row['username']}"
+    elif new_user_row and new_user_row["first_name"]:
+        uname = new_user_row["first_name"]
+    else:
+        uname = f"User {new_user_id}"
+
+    try:
+        await bot.send_message(
+            referrer_id,
+            "🎉 <b>New Referral Alert!</b> 🎉\n\n"
+            f"👤 <b>User:</b> {html.escape(uname)}\n"
+            f"🪙 <b>You earned:</b> +{reward} coins\n"
+            f"💰 <b>Your new balance:</b> {new_balance} coins",
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError:
+        pass
+
+    await _check_referral_milestone(bot, referrer_id)
+
+
+async def _check_referral_milestone(bot, referrer_id: int) -> None:
+    """Grants a one-time bonus the first time a referrer's total count crosses
+    a configured milestone (e.g. 5, 10, 25, 50 referrals)."""
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (referrer_id,))
+        total = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT referral_milestone_reached FROM users WHERE user_id=?", (referrer_id,))
+        row = await cur.fetchone()
+        already_reached = row[0] if row and row[0] else 0
+
+    milestones = json.loads(await get_setting("referral_milestones", "[]"))
+    for m in sorted(milestones, key=lambda x: x["count"]):
+        if total >= m["count"] > already_reached:
+            await add_coins(referrer_id, m["reward"], "referral_milestone", f"Referral milestone: {m['count']} referrals")
+            async with db_conn() as db:
+                await db.execute("UPDATE users SET referral_milestone_reached=? WHERE user_id=?", (m["count"], referrer_id))
+                await db.commit()
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🏆 <b>Referral Milestone Reached!</b>\n\n"
+                    f"🚀 You've referred <b>{m['count']}</b> people!\n"
+                    f"🪙 Bonus: <b>+{m['reward']} Coins</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
+            break
+
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    admin = await is_admin(user.id)
+    bot_name = await get_setting("bot_name", "FILE STORE BOT 🛍️")
+    balance = await get_balance(user.id)
+
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user.id,))
+        ref_count = (await cur.fetchone())[0]
+
+    is_premium = await is_premium_active(user.id)
+    premium_line = "👑 <b>Premium — Active</b>" if is_premium else "⭐ Premium: <i>Not Active</i>"
+    name_tag = f"👑 {html.escape(user.first_name or 'Friend')}" if is_premium else html.escape(user.first_name or "Friend")
+
+    text = (
+        f"👋 <b>Welcome, {name_tag}!</b>\n\n"
+        f"🏷 <b>{html.escape(bot_name)}</b> <i>({BOT_VERSION})</i>\n"
+        f"{DIVIDER}\n"
+        f"🪙 <b>Wallet:</b> {balance} Coins\n"
+        f"👥 <b>Referrals:</b> {ref_count}\n"
+        f"{premium_line}\n"
+        f"{DIVIDER}\n\n"
+        f"Use the menu below to get started 👇"
+    )
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=user_reply_keyboard(admin)
+    )
+
+
+async def cb_verify_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    missing = await check_force_join(context.bot, user.id)
+    if missing:
+        await query.answer("❌ You haven't joined all channels yet.", show_alert=True)
+        return
+    await query.answer("✅ Verified!")
+    try:
+        await query.message.delete()
+    except BadRequest:
+        pass
+    await ensure_user(user.id, user.username, user.first_name)
+    await maybe_process_referral(context.bot, user.id)
+    await show_main_menu(update, context)
+
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
         return
     text = (
-        "📦 Python Package Installer\n\n"
-        "Send me the package name to install.\n"
-        "Examples:\n"
-        "• requests\n"
-        "• numpy\n"
-        "• pandas==1.5.0\n"
-        "• git+https://github.com/user/repo.git\n\n"
-        "Or send a requirements.txt file.\n\n"
-        "Recommended packages:\n"
-        "pip, setuptools, wheel, requests, numpy, pandas, flask, aiohttp, pyrogram, python-dotenv, beautifulsoup4, lxml, pillow, matplotlib, scipy, scikit-learn, pytest\n\n"
-        "Send ✅ to start installation or type a package name to install it manually."
+        "📖 <b>Help & Guide</b>\n\n"
+        "📁 <b>Buy Files</b> — Browse and purchase files with coins.\n"
+        "🪙 <b>Coins</b> — Buy coins with Telegram Stars, or earn them free via "
+        "Daily Bonus, Referrals, and Redeem Codes.\n"
+        "👥 <b>Referral</b> — Share your personal link, earn coins per new user.\n"
+        "🎟️ <b>Redeem</b> — Enter a code from the admin to instantly get coins.\n"
+        "💬 <b>Support</b> — Reach out any time via the Support menu.\n"
     )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(primary_inline_button("✅ Install Recommended", callback_data="install_recommended"))
-    markup.add(primary_inline_button("❌ Cancel", callback_data="cancel_install"))
-    bot.reply_to(message, stylish_text(text), reply_markup=markup)
-    bot.register_next_step_handler(message, process_manual_package_install)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
-def process_manual_package_install(message):
-    if not check_subscription_and_continue(message):
+
+async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
         return
-    text = message.text.strip()
-    if text == "✅":
-        recommended = ["pip", "setuptools", "wheel", "requests", "numpy", "pandas", "flask", "aiohttp", "pyrogram", "python-dotenv", "beautifulsoup4", "lxml", "pillow", "matplotlib", "scipy", "scikit-learn", "pytest"]
-        bot.reply_to(message, stylish_text(f"🚀 Installing {len(recommended)} recommended packages... This may take a while."))
-        success = 0
-        failed = 0
-        for pkg in recommended:
-            try:
-                result = subprocess.run([sys.executable, '-m', 'pip', 'install', pkg], capture_output=True, text=True)
-                if result.returncode == 0:
-                    success += 1
-                else:
-                    failed += 1
-                    logger.error(f"Failed to install {pkg}: {result.stderr}")
-            except Exception as e:
-                failed += 1
-                logger.error(f"Error installing {pkg}: {e}")
-            time.sleep(0.5)
-        bot.send_message(message.chat.id, stylish_text(f"✅ Installation complete.\n✅ Success: {success}\n❌ Failed: {failed}"))
-    elif text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Installation cancelled."))
-    else:
-        bot.reply_to(message, stylish_text(f"📦 Installing {text}..."))
-        try:
-            result = subprocess.run([sys.executable, '-m', 'pip', 'install', text], capture_output=True, text=True)
-            if result.returncode == 0:
-                bot.send_message(message.chat.id, stylish_text(f"✅ Successfully installed {text}"))
-            else:
-                error_msg = result.stderr[:500]
-                bot.send_message(message.chat.id, stylish_text(f"❌ Failed to install {text}\nError: {error_msg}"))
-        except Exception as e:
-            bot.send_message(message.chat.id, stylish_text(f"❌ Error: {e}"))
+    support_username = await get_setting("support_username", "ARMAAN_x7x")
+    text = (
+        "💬 <b>Support</b>\n\n"
+        f"👤 Contact: @{html.escape(support_username)}\n"
+        "🕒 Business Hours: 10:00 AM – 10:00 PM (IST)\n\n"
+        "We usually reply within a few hours."
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
-@bot.callback_query_handler(func=lambda call: call.data == "install_recommended")
-def install_recommended_callback(call):
-    if not check_subscription_and_continue(None, call):
-        return
-    bot.answer_callback_query(call.id, "Installing recommended packages...")
-    recommended = ["pip", "setuptools", "wheel", "requests", "numpy", "pandas", "flask", "aiohttp", "pyrogram", "python-dotenv", "beautifulsoup4", "lxml", "pillow", "matplotlib", "scipy", "scikit-learn", "pytest"]
-    bot.send_message(call.message.chat.id, stylish_text(f"🚀 Installing {len(recommended)} packages... Please wait."))
-    success = 0
-    failed = 0
-    for pkg in recommended:
-        try:
-            result = subprocess.run([sys.executable, '-m', 'pip', 'install', pkg], capture_output=True, text=True)
-            if result.returncode == 0:
-                success += 1
-            else:
-                failed += 1
-        except:
-            failed += 1
-        time.sleep(0.5)
-    bot.send_message(call.message.chat.id, stylish_text(f"✅ Done.\n✅ Success: {success}\n❌ Failed: {failed}"))
 
-@bot.callback_query_handler(func=lambda call: call.data == "cancel_install")
-def cancel_install_callback(call):
-    bot.answer_callback_query(call.id, "Cancelled.")
-    bot.delete_message(call.message.chat.id, call.message.message_id)
 
-# ======================= AI ASSISTANT - SAMBANOVA INTEGRATION =======================
-def call_sambanova_sync(message: str, model_name: str) -> str:
-    headers = {
-        'Authorization': f'Bearer {SAMBA_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    payload = {
-        'model': model_name,
-        'messages': [
-            {'role': 'system', 'content': 'You are a helpful AI assistant.'},
-            {'role': 'user', 'content': message}
-        ],
-        'temperature': 0.7,
-        'max_tokens': 500,
-        'top_p': 0.95
-    }
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(SAMBA_URL, headers=headers, json=payload, timeout=30)
-            if response.status_code == 429:
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(wait)
-                continue
-            if response.status_code == 200:
-                data = response.json()
-                return data['choices'][0]['message']['content']
-            else:
-                return f"⚠️ API error {response.status_code}: {response.text[:200]}"
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return f"❌ Network error: {str(e)}"
-            time.sleep(2 ** attempt)
-    return "❌ Max retries exceeded."
+async def handle_support_ticket_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await guard_user(update, context):
+        return ConversationHandler.END
+    await update.effective_message.reply_text(
+        "🎫 <b>Open a Support Ticket</b>\n\nWhat's the subject? (short, one line):",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="ticket:cancel", style="primary")]]),
+    )
+    return TK_SUBJECT
 
-def auto_fix_modules_from_text(user_id: int, text: str, chat_id: int):
-    missing_modules = set()
-    matches = re.findall(r"ModuleNotFoundError: No module named '(.+?)'", text)
-    matches.extend(re.findall(r"ImportError: No module named '(.+?)'", text))
-    matches.extend(re.findall(r"No module named '(.+?)'", text))
-    
-    for mod in matches:
-        mod = mod.strip().strip("'\"")
-        if mod and not mod.startswith('.') and mod not in ['sys', 'os', 're', 'time', 'json', 'datetime']:
-            missing_modules.add(mod)
-    
-    if not missing_modules:
-        bot.send_message(chat_id, stylish_text("ℹ️ No missing modules found in your message. If you need help, just ask me directly."))
-        return
-    
-    bot.send_message(chat_id, stylish_text(f"🔍 Detected missing modules: {', '.join(missing_modules)}\n\n🔄 Installing them automatically..."))
-    
-    installed = 0
-    failed = 0
-    results = []
-    for mod in missing_modules:
-        try:
-            result = subprocess.run([sys.executable, '-m', 'pip', 'install', mod], capture_output=True, text=True)
-            if result.returncode == 0:
-                installed += 1
-                results.append(f"✅ {mod}")
-            else:
-                failed += 1
-                results.append(f"❌ {mod} - {result.stderr[:100]}")
-        except Exception as e:
-            failed += 1
-            results.append(f"❌ {mod} - {str(e)}")
-        time.sleep(0.5)
-    
-    summary = f"🔧 Auto-fix completed:\n" + "\n".join(results) + f"\n\n✅ Installed: {installed}\n❌ Failed: {failed}\n\n💡 After installation, restart your script using the Restart button."
-    bot.send_message(chat_id, stylish_text(summary))
 
-def get_bot_help_text() -> str:
-    return (
-        "🤖 𝐀𝐆𝐄𝐍𝐓 𝐇𝐄𝐋𝐏 𝐆𝐔𝐈𝐃𝐄\n\n"
-        "📌 𝐁𝐚𝐬𝐢𝐜 𝐂𝐨𝐦𝐦𝐚𝐧𝐝𝐬\n"
-        "/start - Main menu\n"
-        "/uploadfile - Upload .py / .js / .zip\n"
-        "/checkfiles - See your uploaded files\n"
-        "/restart - Restart all your scripts\n"
-        "/stop - Stop all your scripts\n"
-        "/botspeed - Check bot speed & system info\n"
-        "/statistics - Bot statistics\n"
-        "/model - Show current AI model\n"
-        "/setmodel - Change AI model (admin only)\n\n"
-        "📂 𝐅𝐢𝐥𝐞 𝐌𝐚𝐧𝐚𝐠𝐞𝐦𝐞𝐧𝐭\n"
-        "• Upload file → Admin approves → Script starts automatically\n"
-        "• From 'My Files' you can: Start, Stop, Restart, Delete, View Logs, AI Fix\n"
-        "• Supported: .py (Python), .js (Node.js), .zip (extracted, auto-detects main script)\n\n"
-        "🔧 𝐀𝐈 𝐅𝐢𝐱\n"
-        "Automatically installs missing Python modules from error logs.\n"
-        "Click 'AI Fix' on any file or just send me the error message here!\n\n"
-        "⚙️ 𝐑𝐞𝐜𝐨𝐦𝐦𝐞𝐧𝐝𝐞𝐝 𝐈𝐧𝐬𝐭𝐚𝐥𝐥\n"
-        "Install common Python packages (requests, numpy, flask, etc.) in one click.\n\n"
-        "🌐 𝐆𝐢𝐭𝐇𝐮𝐛 𝐃𝐞𝐩𝐥𝐨𝐲\n"
-        "Send a GitHub repo URL, bot will download zip and submit for approval.\n\n"
-        "🤖 𝐀𝐈 𝐀𝐠𝐞𝐧𝐭\n"
-        "Powered by SambaNova AI. Supports models: Llama, DeepSeek, MiniMax, GPT-OSS.\n"
-        "Admins can change the model with /setmodel.\n\n"
-        "👑 𝐀𝐝𝐦𝐢𝐧 𝐅𝐞𝐚𝐭𝐮𝐫𝐞𝐬 (only for admins/owner)\n"
-        "• Add/Remove admins\n"
-        "• Set custom file limits per user\n"
-        "• Add/Remove subscriptions (premium users get 15 files)\n"
-        "• Broadcast message to all users\n"
-        "• Lock/unlock bot\n"
-        "• Run all user scripts\n"
-        "• Change AI model (/setmodel)\n\n"
-        "💡 𝐓𝐢𝐩𝐬\n"
-        "• Free users: 2 files max, Premium: 15, Admin: 999, Owner: unlimited\n"
-        "• Script logs are saved as `.log` file in your folder\n"
-        "• If your script crashes, check logs and use AI Fix\n"
-        "• You can ask me any coding question, I'll use the selected AI model to answer.\n\n"
-        "🤖 Simply type your question or send an error message, and I'll help!"
+async def cb_ticket_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    context.user_data.pop("tk_subject", None)
+    return ConversationHandler.END
+
+
+async def conv_ticket_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    subject = update.message.text.strip()
+    if len(subject) > 100:
+        await update.message.reply_text("❌ Please keep the subject under 100 characters.")
+        return TK_SUBJECT
+    context.user_data["tk_subject"] = subject
+    await update.message.reply_text("📝 Now describe your issue in detail:")
+    return TK_BODY
+
+
+async def conv_ticket_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    body = update.message.text.strip()
+    subject = context.user_data.pop("tk_subject", "")
+    user = update.effective_user
+
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO tickets (user_id, subject, body, status, created_at) VALUES (?, ?, ?, 'open', ?)",
+            (user.id, subject, body, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid()")
+        ticket_id = (await cur.fetchone())[0]
+
+    await update.message.reply_text(
+        f"✅ <b>Ticket #{ticket_id} Submitted!</b>\n\nOur team will get back to you soon.",
+        parse_mode=ParseMode.HTML,
     )
 
-def handle_deepseek_chat(message):
-    if not check_subscription_and_continue(message):
-        return
-    if not message.text:
-        bot.reply_to(message, stylish_text("Please send a text message or an error log."))
-        bot.register_next_step_handler(message, handle_deepseek_chat)
-        return
-    user_text = message.text.strip()
-    if user_text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("AI Agent mode cancelled."))
-        return
-    
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    help_keywords = ['how to use', 'help', 'commands', 'kya kar sakta', 'kaise use', 'guide', 'features', 'what can you do', 'bot kaise chalaye']
-    if any(keyword in user_text.lower() for keyword in help_keywords):
-        bot.send_chat_action(chat_id, 'typing')
-        bot.reply_to(message, stylish_text(get_bot_help_text()))
-        bot.register_next_step_handler(message, handle_deepseek_chat)
-        return
-    
-    error_patterns = ['ModuleNotFoundError', 'ImportError', 'No module named', 'module not found']
-    if any(pattern in user_text for pattern in error_patterns):
-        bot.send_chat_action(chat_id, 'typing')
-        thinking = bot.reply_to(message, stylish_text("🔍 Detecting missing modules and fixing automatically..."))
-        auto_fix_modules_from_text(user_id, user_text, chat_id)
+    uname = f"@{user.username}" if user.username else "—"
+    notify = (
+        f"🎫 <b>New Support Ticket #{ticket_id}</b>\n\n"
+        f"👤 From: {html.escape(uname)}\n🆔 User ID: <code>{user.id}</code>\n"
+        f"📌 Subject: {html.escape(subject)}\n\n📝 {html.escape(body)}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Reply", callback_data=f"ticket:reply:{ticket_id}", style="primary"),
+         InlineKeyboardButton("✅ Close", callback_data=f"ticket:close:{ticket_id}", style="primary")],
+    ])
+    for admin_id in await get_all_admin_ids():
         try:
-            bot.delete_message(chat_id, thinking.message_id)
-        except:
+            await context.bot.send_message(admin_id, notify, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError:
             pass
-        bot.register_next_step_handler(message, handle_deepseek_chat)
-        return
-    
-    bot.send_chat_action(chat_id, 'typing')
-    thinking_msg = bot.reply_to(message, stylish_text("🤔 Thinking..."))
-    model_full = AVAILABLE_MODELS[global_model]
-    response = call_sambanova_sync(user_text, model_full)
-    if len(response) > 4000:
-        response = response[:4000] + "... (truncated)"
-    bot.edit_message_text(stylish_text(response), chat_id, thinking_msg.message_id)
-    bot.register_next_step_handler(message, handle_deepseek_chat)
+    return ConversationHandler.END
 
-def _logic_ai_assistant(message):
-    if not check_subscription_and_continue(message):
-        return
-    welcome_text = (
-        f"🤖 Aɪ Aɢᴇɴᴛ\n\n"
-        f"⚡ Cᴜʀʀᴇɴᴛ Aɪ Mᴏᴅᴇʟ: *{global_model}* ({AVAILABLE_MODELS[global_model]})\n\n"
-        "📌 Fᴇᴀᴛᴜʀᴇs:\n\n"
-        "• 📦 Aᴜᴛᴏ-ꜰɪx – Sᴇɴᴅ ᴀɴʏ `ModuleNotFoundError` ᴏʀ `ImportError`, I ᴡɪʟʟ ɪɴꜱᴛᴀʟʟ ᴍɪꜱꜱɪɴɢ ᴘᴀᴄᴋᴀɢᴇs.\n"
-        "• 📄 Cʜᴇᴄᴋ Lᴏɢs – Aꜱᴋ ᴍᴇ ᴛᴏ ꜱʜᴏᴡ ʟᴏɢꜱ ᴏꜰ ʏᴏᴜʀ ꜰɪʟᴇ.\n"
-        "• 💡 Bᴏᴛ Uꜱᴀɢᴇ – Tʏᴘᴇ `how to use` ᴏʀ `help` ꜰᴏʀ ᴄᴏᴍᴘʟᴇᴛᴇ ɢᴜɪᴅᴇ.\n"
-        "• 🚀 Cᴏᴅɪɴɢ Qᴜᴇꜱᴛɪᴏɴꜱ – Aꜱᴋ ᴍᴇ ᴀɴʏᴛʜɪɴɢ, I ᴜꜱᴇ ᴛʜᴇ ꜱᴇʟᴇᴄᴛᴇᴅ Aɪ ᴍᴏᴅᴇʟ.\n\n"
-        "🤖 Aᴅᴍɪɴꜱ ᴄᴀɴ ᴄʜᴀɴɢᴇ ᴛʜᴇ ᴍᴏᴅᴇʟ ᴜꜱɪɴɢ `/setmodel`.\n\n"
-        "📌 Jᴜꜱᴛ ꜱᴇɴᴅ ʏᴏᴜʀ ᴇʀʀᴏʀ, Qᴜᴇꜱᴛɪᴏɴ, ᴏʀ ᴛʏᴘᴇ `help` "
-        "ᴀɴᴅ I ᴡɪʟʟ ᴀꜱꜱɪꜱᴛ ʏᴏᴜ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ.\n\n"
-        "🤖 Aɪ Pᴏᴡᴇʀᴇᴅ • 24×7 Aᴄᴛɪᴠᴇ"
-    )
-    bot.reply_to(message, stylish_text(welcome_text), parse_mode="Markdown")
-    bot.register_next_step_handler(message, handle_deepseek_chat)
 
-# ======================= AI FIX =======================
-def ai_fix_script(owner_id, file_name, chat_id, message_id):
-    folder = get_user_folder(owner_id)
-    log_path = os.path.join(folder, f"{os.path.splitext(file_name)[0]}.log")
-    if not os.path.exists(log_path):
-        bot.send_message(chat_id, stylish_text(f"No log file found for {file_name}. Run the script first to generate errors."))
-        return
-    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-        log_content = f.read()
-    missing_modules = set()
-    matches = re.findall(r"ModuleNotFoundError: No module named '(.+?)'", log_content)
-    matches.extend(re.findall(r"ImportError: No module named '(.+?)'", log_content))
-    for mod in matches:
-        mod = mod.strip().strip("'\"")
-        missing_modules.add(mod)
-    if not missing_modules:
-        bot.send_message(chat_id, stylish_text(f"✅ No missing modules found in log of {file_name}. The script might have other errors. Use /checklogs {file_name} to see details."))
-        return
-    installed = 0
-    failed = 0
-    results = []
-    for mod in missing_modules:
-        bot.send_message(chat_id, stylish_text(f"📦 Installing {mod}..."))
-        try:
-            result = subprocess.run([sys.executable, '-m', 'pip', 'install', mod], capture_output=True, text=True)
-            if result.returncode == 0:
-                installed += 1
-                results.append(f"✅ {mod}")
-            else:
-                failed += 1
-                results.append(f"❌ {mod} - {result.stderr[:100]}")
-        except Exception as e:
-            failed += 1
-            results.append(f"❌ {mod} - {str(e)}")
-        time.sleep(0.5)
-    summary = f"🔧 AI Fix completed for {file_name}:\n" + "\n".join(results) + f"\n\n✅ Installed: {installed}\n❌ Failed: {failed}"
-    bot.send_message(chat_id, stylish_text(summary))
-    bot.send_message(chat_id, stylish_text("💡 Restart the script using the Restart button to apply changes."))
+async def cb_ticket_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not await is_admin(update.effective_user.id):
+        await query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    ticket_id = int(query.data.split(":")[2])
+    context.user_data["tk_reply_id"] = ticket_id
+    await query.message.reply_text("💬 Type your reply — it will be sent to the user:")
+    return TK_REPLY
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('aifix_'))
-def ai_fix_callback(call):
-    if not check_subscription_and_continue(None, call):
-        return
+
+async def conv_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ticket_id = context.user_data.pop("tk_reply_id", None)
+    if ticket_id is None:
+        await update.message.reply_text("❌ Something went wrong — please try again.")
+        return ConversationHandler.END
+    reply_text = update.message.text.strip()
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM tickets WHERE ticket_id=?", (ticket_id,))
+        ticket = await cur.fetchone()
+
+    if not ticket:
+        await update.message.reply_text("❌ Ticket not found.")
+        return ConversationHandler.END
+    if ticket["status"] != "open":
+        await update.message.reply_text("🚫 This ticket is already closed.")
+        return ConversationHandler.END
+
+    user_kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Reply", callback_data=f"ticket:ureply:{ticket_id}", style="primary")]])
     try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
+        await context.bot.send_message(
+            ticket["user_id"],
+            f"🎫 <b>Support Reply (Ticket #{ticket_id})</b>\n\n{html.escape(reply_text)}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=user_kb,
+        )
+        await update.message.reply_text("✅ Reply sent to the user.")
+    except TelegramError:
+        await update.message.reply_text("⚠️ Couldn't deliver the reply — the user may have blocked the bot.")
+
+    await log_admin_action(context.bot, update.effective_user.id, f"💬 Replied to ticket #{ticket_id}")
+    return ConversationHandler.END
+
+
+async def cb_ticket_user_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    ticket_id = int(query.data.split(":")[2])
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM tickets WHERE ticket_id=?", (ticket_id,))
+        ticket = await cur.fetchone()
+
+    if not ticket:
+        await query.answer("❌ Ticket not found.", show_alert=True)
+        return ConversationHandler.END
+    if ticket["user_id"] != update.effective_user.id:
+        await query.answer("🚫 This isn't your ticket.", show_alert=True)
+        return ConversationHandler.END
+    if ticket["status"] != "open":
+        await query.answer("🚫 This ticket is already closed.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["tk_user_reply_id"] = ticket_id
+    await query.message.reply_text(
+        "💬 Type your reply:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="ticket:cancel", style="primary")]]),
+    )
+    return TK_USER_REPLY
+
+
+async def conv_ticket_user_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ticket_id = context.user_data.pop("tk_user_reply_id", None)
+    if ticket_id is None:
+        await update.message.reply_text("❌ Something went wrong — please try again.")
+        return ConversationHandler.END
+    reply_text = update.message.text.strip()
+    user = update.effective_user
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM tickets WHERE ticket_id=?", (ticket_id,))
+        ticket = await cur.fetchone()
+
+    if not ticket:
+        await update.message.reply_text("❌ Ticket not found.")
+        return ConversationHandler.END
+    if ticket["status"] != "open":
+        await update.message.reply_text("🚫 This ticket is already closed.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("✅ Reply sent to support.")
+
+    uname = f"@{user.username}" if user.username else "—"
+    notify = (
+        f"🎫 <b>Ticket #{ticket_id} — User Reply</b>\n\n"
+        f"👤 From: {html.escape(uname)}\n🆔 User ID: <code>{user.id}</code>\n\n💬 {html.escape(reply_text)}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Reply", callback_data=f"ticket:reply:{ticket_id}", style="primary"),
+         InlineKeyboardButton("✅ Close", callback_data=f"ticket:close:{ticket_id}", style="primary")],
+    ])
+    for admin_id in await get_all_admin_ids():
+        try:
+            await context.bot.send_message(admin_id, notify, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError:
+            pass
+    return ConversationHandler.END
+
+
+async def cb_ticket_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not await is_admin(update.effective_user.id):
+        await query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        return
+    ticket_id = int(query.data.split(":")[2])
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM tickets WHERE ticket_id=?", (ticket_id,))
+        ticket = await cur.fetchone()
+        if not ticket:
+            await query.answer("❌ Not found.", show_alert=True)
             return
-        bot.answer_callback_query(call.id, stylish_text("AI Fix running... This may take a moment."))
-        threading.Thread(target=ai_fix_script, args=(owner_id, file_name, call.message.chat.id, call.message.message_id)).start()
-    except Exception as e:
-        logger.error(f"AI Fix error: {e}")
-        bot.answer_callback_query(call.id, stylish_text(f"Error: {e}"), show_alert=True)
-
-# ======================= BAN / UNBAN COMMANDS =======================
-@bot.message_handler(commands=['ban'])
-def cmd_ban(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if user_id not in admin_ids and user_id != OWNER_ID:
-        bot.reply_to(message, stylish_text("⚠️ Admin only command."))
-        return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(message, stylish_text("Usage: /ban user_id\nExample: /ban 123456789"))
-        return
+        await db.execute(
+            "UPDATE tickets SET status='closed', admin_id=?, closed_at=? WHERE ticket_id=?",
+            (update.effective_user.id, datetime.utcnow().isoformat(), ticket_id),
+        )
+        await db.commit()
+    await query.answer("✅ Closed")
     try:
-        target_id = int(parts[1])
-    except:
-        bot.reply_to(message, stylish_text("Invalid user ID. Use numeric ID."))
-        return
-    if target_id in admin_ids or target_id == OWNER_ID:
-        bot.reply_to(message, stylish_text("❌ Cannot ban an admin or owner."))
-        return
-    if ban_user(target_id):
-        bot.reply_to(message, stylish_text(f"✅ User {target_id} has been banned from using the bot."))
-        try:
-            bot.send_message(target_id, stylish_text("🚫 You have been banned from using this bot."))
-        except:
-            pass
-    else:
-        bot.reply_to(message, stylish_text(f"❌ Failed to ban user {target_id}."))
-
-@bot.message_handler(commands=['unban'])
-def cmd_unban(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if user_id not in admin_ids and user_id != OWNER_ID:
-        bot.reply_to(message, stylish_text("⚠️ Admin only command."))
-        return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(message, stylish_text("Usage: /unban user_id\nExample: /unban 123456789"))
-        return
+        await query.message.delete()
+    except TelegramError:
+        pass
     try:
-        target_id = int(parts[1])
-    except:
-        bot.reply_to(message, stylish_text("Invalid user ID. Use numeric ID."))
-        return
-    if unban_user(target_id):
-        bot.reply_to(message, stylish_text(f"✅ User {target_id} has been unbanned."))
+        await context.bot.send_message(
+            ticket["user_id"], f"✅ <b>Your ticket #{ticket_id} has been closed.</b>", parse_mode=ParseMode.HTML
+        )
+    except TelegramError:
+        pass
+    await log_admin_action(context.bot, update.effective_user.id, f"✅ Closed ticket #{ticket_id}")
+
+
+
+async def handle_file_request_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await guard_user(update, context):
+        return ConversationHandler.END
+    await update.effective_message.reply_text(
+        "📥 <b>Request a File</b>\n\nTell us what file/project you're looking for — we'll try to add it:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="freq:cancel", style="primary")]]),
+    )
+    return FR_TEXT
+
+
+async def cb_file_request_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+async def conv_file_request_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    user = update.effective_user
+
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO file_requests (user_id, request_text, status, timestamp) VALUES (?, ?, 'open', ?)",
+            (user.id, text, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid()")
+        req_id = (await cur.fetchone())[0]
+
+    await update.message.reply_text("✅ <b>Request Submitted!</b>\n\nThanks — we'll review it soon.", parse_mode=ParseMode.HTML)
+
+    uname = f"@{user.username}" if user.username else "—"
+    notify = (
+        f"📥 <b>New File Request #{req_id}</b>\n\n"
+        f"👤 From: {html.escape(uname)}\n🆔 User ID: <code>{user.id}</code>\n\n📝 {html.escape(text)}"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Mark Fulfilled", callback_data=f"freq:done:{req_id}", style="primary")]])
+    for admin_id in await get_all_admin_ids():
         try:
-            bot.send_message(target_id, stylish_text("✅ You have been unbanned. You can now use the bot again."))
-        except:
+            await context.bot.send_message(admin_id, notify, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError:
             pass
-    else:
-        bot.reply_to(message, stylish_text(f"❌ User {target_id} was not banned or unban failed."))
+    return ConversationHandler.END
 
-# ======================= ADMIN: STOP ALL RUNNING SCRIPTS =======================
-@bot.message_handler(commands=['stop'])
-def cmd_stop_all(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if user_id not in admin_ids and user_id != OWNER_ID:
-        bot.reply_to(message, stylish_text("⚠️ Admin only command."))
-        return
-    running = list(bot_scripts.items())
-    if not running:
-        bot.reply_to(message, stylish_text("ℹ️ No scripts are currently running."))
-        return
-    stopped = 0
-    for key, info in running:
-        try:
-            kill_process_tree(info)
-            stopped += 1
-        except Exception as e:
-            logger.error(f"Failed to stop {key}: {e}")
-    bot_scripts.clear()
-    bot.reply_to(message, stylish_text(f"✅ Stopped {stopped} running script(s)."))
 
-# ======================= USER STOP ALL SCRIPTS =======================
-def _logic_stop_my_scripts(message):
-    if not check_subscription_and_continue(message):
+async def cb_file_request_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not await is_admin(update.effective_user.id):
+        await query.answer(ADMIN_ONLY_MSG, show_alert=True)
         return
-    user_id = message.from_user.id
-    files = user_files.get(user_id, [])
-    if not files:
-        bot.reply_to(message, stylish_text("📂 You have no uploaded files to stop."))
-        return
-    stopped = 0
-    for file_name, ftype in files:
-        script_key = f"{user_id}_{file_name}"
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-            stopped += 1
-            time.sleep(0.2)
-    bot.reply_to(message, stylish_text(f"⏹ Stopped {stopped} of your script(s)."))
-
-# ======================= USER RESTART ALL SCRIPTS =======================
-def _logic_restart_my_scripts(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    files = user_files.get(user_id, [])
-    if not files:
-        bot.reply_to(message, stylish_text("📂 You have no uploaded files to restart."))
-        return
-    bot.reply_to(message, stylish_text("🔄 Restarting all your scripts..."))
-    stopped = 0
-    started = 0
-    for file_name, ftype in files:
-        script_key = f"{user_id}_{file_name}"
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-            stopped += 1
-            time.sleep(0.3)
-    for file_name, ftype in files:
-        folder = get_user_folder(user_id)
-        script_path = os.path.join(folder, file_name)
-        if not os.path.exists(script_path):
-            bot.send_message(message.chat.id, stylish_text(f"⚠️ File {file_name} not found locally, skipping."))
-            continue
-        if ftype == 'py':
-            threading.Thread(target=run_script, args=(script_path, user_id, folder, file_name, message)).start()
-        elif ftype == 'js':
-            threading.Thread(target=run_js_script, args=(script_path, user_id, folder, file_name, message)).start()
-        else:
-            continue
-        started += 1
-        time.sleep(0.5)
-    bot.send_message(message.chat.id, stylish_text(f"✅ Restarted {started} of your script(s). (Stopped {stopped} before restart)"))
-
-# ======================= AUTO-RECOVERY SYSTEM =======================
-def auto_recovery_worker():
-    while True:
-        time.sleep(30)
-        try:
-            current_time = time.time()
-            for script_key, info in list(bot_scripts.items()):
-                try:
-                    proc = info.get('process')
-                    if not proc or not hasattr(proc, 'pid'):
-                        continue
-                    pid = proc.pid
-                    if not pid:
-                        continue
-                    try:
-                        p = psutil.Process(pid)
-                        if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
-                            raise psutil.NoSuchProcess(pid)
-                    except psutil.NoSuchProcess:
-                        last = auto_recovery_last_restart.get(script_key, 0)
-                        if current_time - last < 60:
-                            continue
-                        auto_recovery_last_restart[script_key] = current_time
-                        
-                        owner_id = info.get('script_owner_id')
-                        file_name = info.get('file_name')
-                        chat_id = info.get('chat_id')
-                        file_type = info.get('type')
-                        user_folder = info.get('user_folder')
-                        
-                        if not owner_id or not file_name:
-                            continue
-                        
-                        logger.info(f"Auto-recovery: Restarting {script_key} (crashed)")
-                        if chat_id:
-                            try:
-                                bot.send_message(chat_id, stylish_text(f"🔄 Auto-Recovery: {file_name} crashed and is being restarted..."))
-                            except:
-                                pass
-                        
-                        if 'log_file' in info and hasattr(info['log_file'], 'close') and not info['log_file'].closed:
-                            try:
-                                info['log_file'].close()
-                            except:
-                                pass
-                        del bot_scripts[script_key]
-                        
-                        script_path = os.path.join(user_folder, file_name)
-                        if not os.path.exists(script_path):
-                            logger.warning(f"Auto-recovery: {script_path} missing, cannot restart")
-                            continue
-                        if file_type == 'py':
-                            threading.Thread(target=run_script, args=(script_path, owner_id, user_folder, file_name, None)).start()
-                        elif file_type == 'js':
-                            threading.Thread(target=run_js_script, args=(script_path, owner_id, user_folder, file_name, None)).start()
-                except Exception as e:
-                    logger.error(f"Auto-recovery error for {script_key}: {e}")
-        except Exception as e:
-            logger.error(f"Auto-recovery worker error: {e}")
-
-recovery_thread = threading.Thread(target=auto_recovery_worker, daemon=True)
-recovery_thread.start()
-
-# ======================= RESTART COMMAND =======================
-@bot.message_handler(commands=['restart'])
-def cmd_restart_all(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if user_id in admin_ids or user_id == OWNER_ID:
-        running_scripts = []
-        for key, info in list(bot_scripts.items()):
-            try:
-                parts = key.split('_', 1)
-                if len(parts) == 2:
-                    owner_id = int(parts[0])
-                    file_name = parts[1]
-                    ftype = None
-                    if owner_id in user_files:
-                        for fname, ft in user_files[owner_id]:
-                            if fname == file_name:
-                                ftype = ft
-                                break
-                    if ftype:
-                        running_scripts.append((owner_id, file_name, ftype))
-            except Exception as e:
-                logger.error(f"Error capturing script {key}: {e}")
-        if not running_scripts:
-            bot.reply_to(message, stylish_text("ℹ️ No scripts are currently running."))
+    req_id = int(query.data.split(":")[2])
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM file_requests WHERE request_id=?", (req_id,))
+        req = await cur.fetchone()
+        if not req:
+            await query.answer("❌ Not found.", show_alert=True)
             return
-        stopped = 0
-        for key, info in list(bot_scripts.items()):
-            try:
-                kill_process_tree(info)
-                stopped += 1
-            except Exception as e:
-                logger.error(f"Failed to stop {key}: {e}")
-        bot_scripts.clear()
-        bot.reply_to(message, stylish_text(f"🛑 Stopped {stopped} script(s). Now restarting all user scripts..."))
-        started = 0
-        for owner_id, file_name, ftype in running_scripts:
-            folder = get_user_folder(owner_id)
-            script_path = os.path.join(folder, file_name)
-            if not os.path.exists(script_path):
-                logger.warning(f"Cannot restart {file_name} (user {owner_id}) - file missing")
-                continue
-            if ftype == 'py':
-                threading.Thread(target=run_script, args=(script_path, owner_id, folder, file_name, message)).start()
-            elif ftype == 'js':
-                threading.Thread(target=run_js_script, args=(script_path, owner_id, folder, file_name, message)).start()
-            else:
-                continue
-            started += 1
-            time.sleep(0.5)
-        bot.send_message(message.chat.id, stylish_text(f"✅ Restarted {started} script(s) for all users."))
+        await db.execute("UPDATE file_requests SET status='fulfilled' WHERE request_id=?", (req_id,))
+        await db.commit()
+    await query.answer("✅ Marked fulfilled")
+    try:
+        await query.message.delete()
+    except TelegramError:
+        pass
+    try:
+        await context.bot.send_message(
+            req["user_id"],
+            f"✅ <b>Your file request has been fulfilled!</b>\n\n📝 {html.escape(req['request_text'])}\n\nCheck 📁 Buy Files!",
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError:
+        pass
+    await log_admin_action(context.bot, update.effective_user.id, f"✅ Fulfilled file request #{req_id}")
+
+
+async def handle_my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
         return
-    _logic_restart_my_scripts(message)
+    await send_wallet_view(update, context)
 
-# --- Menu Creation ---
-def create_control_buttons(script_owner_id, file_name, is_running=True):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    if is_running:
-        markup.row(
-            primary_inline_button("🔴 Stop", callback_data=f'stop_{script_owner_id}_{file_name}'),
-            primary_inline_button("🔄 Restart", callback_data=f'restart_{script_owner_id}_{file_name}')
-        )
-        markup.row(
-            primary_inline_button("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'),
-            primary_inline_button("📜 Logs", callback_data=f'logs_{script_owner_id}_{file_name}')
-        )
-        markup.row(
-            primary_inline_button("🤖 AI Fix", callback_data=f'aifix_{script_owner_id}_{file_name}'),
-            primary_inline_button("🔙 Back", callback_data='check_files')
-        )
-    else:
-        markup.row(
-            primary_inline_button("🟢 Start", callback_data=f'start_{script_owner_id}_{file_name}'),
-            primary_inline_button("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}')
-        )
-        markup.row(
-            primary_inline_button("📜 View Logs", callback_data=f'logs_{script_owner_id}_{file_name}'),
-            primary_inline_button("🤖 AI Fix", callback_data=f'aifix_{script_owner_id}_{file_name}')
-        )
-        markup.row(primary_inline_button("🔙 Back to Files", callback_data='check_files'))
-    return markup
 
-def create_main_menu_inline(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
+async def send_wallet_view(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False) -> None:
+    user = update.effective_user
+    balance = await get_balance(user.id)
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user.id,))
+        ref_count = (await cur.fetchone())[0]
+    daily_status = await bonus_status_text(user.id)
+    is_premium = await is_premium_active(user.id)
+    premium_line = "👑 <b>Premium — Active</b>" if is_premium else "⭐ Premium: <i>Not Active</i>"
+
+    text = (
+        "💎 <b>My Wallet</b>\n"
+        f"{DIVIDER}\n"
+        f"🪙 <b>Coins:</b> {balance}\n"
+        f"👥 <b>Total Referrals:</b> {ref_count}\n"
+        f"🎁 <b>Daily Bonus:</b> {daily_status}\n"
+        f"{premium_line}\n"
+        f"{DIVIDER}"
+    )
     buttons = [
-        primary_inline_button(get_button_label('updates'), callback_data='updates_channel'),
-        primary_inline_button(get_button_label('upload'), callback_data='upload'),
-        primary_inline_button(get_button_label('my_files'), callback_data='check_files'),
-        primary_inline_button(get_button_label('speed'), callback_data='speed'),
-        primary_inline_button(get_button_label('recommended'), callback_data='recommended_install'),
-        primary_inline_button(get_button_label('ai'), callback_data='ai_assistant'),
-        primary_inline_button(get_button_label('github'), callback_data='github_deploy'),
-        primary_inline_button(get_button_label('contact'), url=f'https://t.me/{YOUR_USERNAME.replace("@", "")}')
+        [InlineKeyboardButton("⭐ Buy Coins (Stars)", callback_data="wallet:buycoins", style="success"),
+         InlineKeyboardButton("💵 Buy Coins (৳)", callback_data="wallet:buybdt", style="success")],
+        [InlineKeyboardButton("📜 Transactions", callback_data="wallet:tx:0", style="primary")],
     ]
-    if user_id in admin_ids:
-        admin_buttons = [
-            primary_inline_button(get_button_label('subscription'), callback_data='subscription'),
-            primary_inline_button(get_button_label('status'), callback_data='stats'),
-            primary_inline_button(get_button_label('lock') if not bot_locked else '🔓 Unlock Bot', callback_data='lock_bot' if not bot_locked else 'unlock_bot'),
-            primary_inline_button(get_button_label('broadcast'), callback_data='broadcast'),
-            primary_inline_button(get_button_label('admin'), callback_data='admin_panel'),
-            primary_inline_button(get_button_label('run_all'), callback_data='run_all_scripts')
-        ]
-        markup.add(buttons[0])
-        markup.add(buttons[1], buttons[2])
-        markup.add(buttons[3], admin_buttons[0])
-        markup.add(admin_buttons[1], admin_buttons[3])
-        markup.add(admin_buttons[2], admin_buttons[5])
-        markup.add(admin_buttons[4])
-        markup.add(buttons[4], buttons[5])
-        markup.add(buttons[6])
-        markup.add(buttons[7])
+    if not is_premium:
+        buttons.append([InlineKeyboardButton("👑 Buy Premium with Coins", callback_data="wallet:buypremium", style="primary")])
+    kb = InlineKeyboardMarkup(buttons)
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        markup.add(buttons[0])
-        markup.add(buttons[1], buttons[2])
-        markup.add(buttons[3])
-        markup.add(primary_inline_button(get_button_label('status'), callback_data='stats'))
-        markup.add(buttons[4], buttons[5])
-        markup.add(buttons[6])
-        markup.add(buttons[7])
-    return markup
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-def create_reply_keyboard_main_menu(user_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    rows = [
-        [get_button_label('updates')],
-        [get_button_label('upload'), get_button_label('my_files')],
-        [get_button_label('speed'), get_button_label('status')],
-        [get_button_label('restart'), get_button_label('stop')],
-    ]
-    if user_id in admin_ids:
-        rows += [
-            [get_button_label('subscription'), get_button_label('broadcast')],
-            [get_button_label('lock'), get_button_label('run_all')],
-            [get_button_label('admin'), get_button_label('recommended')],
-            [get_button_label('ai'), get_button_label('github')],
-            [get_button_label('contact')],
-        ]
-    else:
-        rows += [
-            [get_button_label('recommended'), get_button_label('ai')],
-            [get_button_label('github'), get_button_label('contact')],
-        ]
-    for row in rows:
-        markup.add(*[primary_reply_button(text) for text in row])
-    return markup
 
-def create_admin_panel():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.row(primary_inline_button('➕ Add Admin', callback_data='add_admin'), primary_inline_button('➖ Remove Admin', callback_data='remove_admin'))
-    markup.row(primary_inline_button('📋 List Admins', callback_data='list_admins'))
-    markup.row(primary_inline_button('📢 Manage Channels', callback_data='manage_channels'))
-    markup.row(primary_inline_button('🔧 Set User Limit', callback_data='set_user_limit'))
-    markup.row(primary_inline_button('🤖 Change AI Model', callback_data='change_ai_model'))
-    markup.row(primary_inline_button('🔤 Change Buttons', callback_data='change_buttons'))
-    markup.row(primary_inline_button('🔙 Back to Main', callback_data='back_to_main'))
-    return markup
+async def cb_wallet_buy_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if await is_premium_active(update.effective_user.id):
+        await query.answer("✅ You already have Premium active.", show_alert=True)
+        return
+    pricing = json.loads(await get_setting("premium_pricing", "[]"))
+    balance = await get_balance(update.effective_user.id)
+    lines = [f"👑 <b>Buy Premium with Coins</b>\n{DIVIDER}", f"🪙 Your balance: <b>{balance}</b>\n"]
+    buttons = []
+    for p in pricing:
+        label = "Lifetime" if p["days"] == 0 else f"{p['days']} Days"
+        lines.append(f"• {label} — 🪙 {p['price']}")
+        buttons.append([InlineKeyboardButton(f"👑 {label} — {p['price']} coins", callback_data=f"premium:buy:{p['days']}:{p['price']}", style="primary")])
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="wallet:home", style="primary")])
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
 
-def create_button_change_panel():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for button_id, name in BUTTON_LABEL_NAMES.items():
-        label = get_button_label(button_id)
-        short = label if len(label) <= 28 else label[:25] + '...'
-        markup.add(primary_inline_button(f'{name}: {short}', callback_data=f'button_select_{button_id}'))
-    markup.add(primary_inline_button('🔄 Reset All Buttons', callback_data='button_reset_all'))
-    markup.add(primary_inline_button('🔙 Back to Admin', callback_data='admin_panel'))
-    return markup
 
-def create_subscription_menu():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.row(
-        primary_inline_button('➕ Add Subscription', callback_data='add_subscription'),
-        primary_inline_button('➖ Remove Subscription', callback_data='remove_subscription')
-    )
-    markup.row(primary_inline_button('🔍 Check Subscription', callback_data='check_subscription'))
-    markup.row(primary_inline_button('🔙 Back to Main', callback_data='back_to_main'))
-    return markup
+async def cb_premium_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    _, _, days, price = query.data.split(":")
+    days, price = int(days), int(price)
 
-def create_model_selection_markup():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for model_key in AVAILABLE_MODELS:
-        markup.add(primary_inline_button(f"{model_key.upper()} – {AVAILABLE_MODELS[model_key]}", callback_data=f"setmodel_{model_key}"))
-    markup.add(primary_inline_button("🔙 Back to Admin", callback_data="admin_panel"))
-    return markup
-
-# --- Logic Functions ---
-def _logic_send_welcome(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    user_name = message.from_user.first_name
-    user_username = message.from_user.username or "Not set"
-    if bot_locked and user_id not in admin_ids:
-        bot.send_message(chat_id, stylish_text("⚠️ Bot locked by admin."))
-        return
-    if user_id not in active_users:
-        add_active_user(user_id)
-        try:
-            owner_msg = (f"🎉 New user!\n👤 {user_name}\n✳️ @{user_username}\n🆔 ID: {user_id}")
-            bot.send_message(OWNER_ID, stylish_text(owner_msg))
-        except: pass
-
-    current_files = get_user_file_count(user_id)
-    box = (
-        "┏━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        "┃   🚀 ARMAAN 𝐇𝐎𝐒𝐓𝐈𝐍𝐆                   ┃\n"
-        "┃      𝐕𝐄𝐑𝐒𝐈𝐎𝐍 𝟯.𝟳                        ┃\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-        f"👤 Wᴇʟᴄᴏᴍᴇ {user_name}!\n"
-        f"🆔 Uꜱᴇʀ ɪᴅ: {user_id}\n\n"
-        f"📁 Fɪʟᴇꜱ: {current_files}\n\n"
-        "⚡ Fᴇᴀᴛᴜʀᴇꜱ:\n"
-        "• Aᴜᴛᴏ-Rᴇᴄᴏᴠᴇʀʏ Sʏꜱᴛᴇᴍ\n"
-        "• Pʏᴛʜᴏɴ / Jꜱ / Zɪᴘ Sᴜᴘᴘᴏʀᴛ\n\n"
-        "Uꜱᴇ Tʜᴇ Bᴜᴛᴛᴏɴ Bᴇʟᴏᴡ Tᴏ Nᴀᴠɪɢᴀᴛᴇ."
-    )
-    try:
-        photos = bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0:
-            file_id = photos.photos[0][-1].file_id
-            bot.send_photo(chat_id, file_id, caption=stylish_text(box), reply_markup=create_reply_keyboard_main_menu(user_id))
-        else:
-            bot.send_message(chat_id, stylish_text(box), reply_markup=create_reply_keyboard_main_menu(user_id))
-    except Exception as e:
-        logger.error(f"Error sending welcome photo: {e}")
-        bot.send_message(chat_id, stylish_text(box), reply_markup=create_reply_keyboard_main_menu(user_id))
-
-def _logic_updates_channel(message):
-    if not check_subscription_and_continue(message):
-        return
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        primary_inline_button("📢 UPDATE CHANNEL", url="https://t.me/HOSTINGxBOTxUPDATE")
-    )
-    bot.reply_to(message, stylish_text("📢 Our Channels:"), reply_markup=markup)
-
-def _logic_upload_file(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if bot_locked and user_id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Bot locked."))
-        return
-    file_limit = get_user_file_limit(user_id)
-    current_files = get_user_file_count(user_id)
-    if current_files >= file_limit:
-        limit_str = str(file_limit) if file_limit != float('inf') else "Unlimited"
-        bot.reply_to(message, stylish_text(f"⚠️ Limit reached ({current_files}/{limit_str}). Delete files first."))
-        return
-    bot.reply_to(message, stylish_text("📤 Send your .py, .js or .zip file. It will be sent to admins for approval."))
-
-def _logic_check_files(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    files = user_files.get(user_id, [])
-    if not files:
-        bot.reply_to(message, stylish_text("📂 No files uploaded yet."))
-        return
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for fname, ftype in sorted(files):
-        is_running = is_bot_running(user_id, fname)
-        status = "🟢 Running" if is_running else "🔴 Stopped"
-        markup.add(primary_inline_button(f"{fname} ({ftype}) - {status}", callback_data=f'file_{user_id}_{fname}'))
-    bot.reply_to(message, stylish_text("📂 Your files:"), reply_markup=markup)
-
-def _logic_bot_speed(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    start = time.time()
-    wait = bot.reply_to(message, stylish_text("🏃 Testing speed..."))
-    try:
-        bot.send_chat_action(message.chat.id, 'typing')
-        latency = round((time.time() - start) * 1000, 2)
-        latency_sec = round(latency / 1000, 4)
-        cpu_freq = psutil.cpu_freq()
-        cpu_ghz = round(cpu_freq.current / 1000, 1) if cpu_freq else 0.0
-        mem = psutil.virtual_memory()
-        total_ram_gb = round(mem.total / (10243), 2)
-        free_ram_gb = round(mem.available / (10243), 2)
-        status = "🔓 Unlocked" if not bot_locked else "🔒 Locked"
-        if user_id == OWNER_ID:
-            level = "👑 Owner"
-        elif user_id in admin_ids:
-            level = "🛡️ Admin"
-        elif user_id in user_subscriptions and user_subscriptions[user_id]['expiry'] > datetime.now():
-            level = "⭐ Premium"
-        else:
-            level = "🆓 Free"
-        msg = (f"⚡ 𝗕𝗢𝗧 𝗦𝗣𝗘𝗘𝗗: {latency_sec} seconds\n"
-               f"⚙️ 𝗖𝗣𝗨: {cpu_ghz} GHz\n"
-               f"💾 𝗥𝗔𝗠: {total_ram_gb} GB\n"
-               f"🟢 𝗙𝗥𝗘𝗘: {free_ram_gb} GB\n"
-               f"🚦 𝗦𝘁𝗮𝘁𝘂𝘀: {status}\n"
-               f"👤 𝗟𝗲𝘃𝗲𝗹: {level}")
-        bot.edit_message_text(stylish_text(msg), message.chat.id, wait.message_id)
-    except Exception as e:
-        bot.edit_message_text(stylish_text("❌ Speed test error."), message.chat.id, wait.message_id)
-
-def _logic_contact_owner(message):
-    if not check_subscription_and_continue(message):
-        return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(primary_inline_button('📞 Contact Owner', url=f'https://t.me/{YOUR_USERNAME.replace("@", "")}'))
-    bot.reply_to(message, stylish_text("Contact owner:"), reply_markup=markup)
-
-def _logic_statistics(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    total_users = len(active_users)
-    total_files = sum(len(f) for f in user_files.values())
-    
-    # ✅ Fixed: iterate over a copy to avoid dictionary changed size
-    running = 0
-    for key, info in list(bot_scripts.items()):
-        try:
-            if is_bot_running(int(key.split('_')[0]), info['file_name']):
-                running += 1
-        except:
-            pass
-    
-    now = datetime.now()
-    uptime_delta = now - BOT_START_TIME
-    days = uptime_delta.days
-    hours, remainder = divmod(uptime_delta.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
-    
-    if user_id in admin_ids:
-        msg = (f"📊 STATUS\n"
-               f"👥 Users: {total_users}\n"
-               f"📂 Files: {total_files}\n"
-               f"🟢 Running: {running}\n"
-               f"⏱️ Uptime: {uptime_str}\n"
-               f"🔒 Bot locked: {bot_locked}")
-    else:
-        msg = (f"📊 STATUS\n"
-               f"👥 Users: {total_users}\n"
-               f"📂 Files: {total_files}\n"
-               f"🟢 Running: {running}\n"
-               f"⏱️ Uptime: {uptime_str}")
-    bot.reply_to(message, stylish_text(msg))
-
-def _logic_subscriptions_panel(message):
-    if not check_subscription_and_continue(message):
-        return
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Admin only."))
-        return
-    bot.reply_to(message, stylish_text("💳 Subscription Management"), reply_markup=create_subscription_menu())
-
-def _logic_broadcast_init(message):
-    if not check_subscription_and_continue(message):
-        return
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Admin only."))
-        return
-    msg = bot.reply_to(message, stylish_text("📢 Send broadcast message.\n/cancel to abort."))
-    bot.register_next_step_handler(msg, process_broadcast_message)
-
-def process_broadcast_message(message):
-    if message.from_user.id not in admin_ids:
-        return
-    if message.text and message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Broadcast cancelled."))
-        return
-    content = message.text
-    if not content:
-        bot.reply_to(message, stylish_text("Cannot broadcast empty text."))
-        return
-    target = len(active_users)
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        primary_inline_button("✅ Confirm", callback_data=f"confirm_broadcast_{message.message_id}"),
-        primary_inline_button("❌ Cancel", callback_data="cancel_broadcast")
-    )
-    bot.reply_to(message, stylish_text(f"⚠️ Confirm broadcast to {target} users:\n\n{content[:500]}"), reply_markup=markup)
-
-def handle_confirm_broadcast(call):
-    admin_id = call.from_user.id
-    if admin_id not in admin_ids:
-        bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-        return
-    original = call.message.reply_to_message
-    if not original or not original.text:
-        bot.answer_callback_query(call.id, stylish_text("No broadcast message found."))
-        return
-    text = original.text
-    bot.answer_callback_query(call.id, stylish_text("Broadcasting..."))
-    bot.edit_message_text(stylish_text("📢 Broadcasting..."), call.message.chat.id, call.message.message_id, reply_markup=None)
-    threading.Thread(target=execute_broadcast, args=(text, call.message.chat.id)).start()
-
-def handle_cancel_broadcast(call):
-    bot.answer_callback_query(call.id, stylish_text("Cancelled."))
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-
-def execute_broadcast(text, admin_chat_id):
-    sent = 0
-    failed = 0
-    for uid in list(active_users):
-        if is_user_banned(uid):
-            continue
-        try:
-            bot.send_message(uid, stylish_text(text))
-            sent += 1
-        except Exception:
-            failed += 1
-        time.sleep(0.05)
-    bot.send_message(admin_chat_id, stylish_text(f"📢 Broadcast done.\n✅ Sent: {sent}\n❌ Failed: {failed}"))
-
-def _logic_toggle_lock_bot(message):
-    if not check_subscription_and_continue(message):
-        return
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Admin only."))
-        return
-    global bot_locked
-    bot_locked = not bot_locked
-    status = "locked" if bot_locked else "unlocked"
-    bot.reply_to(message, stylish_text(f"🔒 Bot {status}."))
-
-def _logic_admin_panel(message):
-    if not check_subscription_and_continue(message):
-        return
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Admin only."))
-        return
-    bot.reply_to(message, stylish_text("🛠️ Admin Panel"), reply_markup=create_admin_panel())
-
-def _logic_run_all_scripts(message):
-    if not check_subscription_and_continue(message):
-        return
-    if message.from_user.id not in admin_ids:
-        bot.reply_to(message, stylish_text("⚠️ Admin only."))
-        return
-    bot.reply_to(message, stylish_text("⏳ Starting all user scripts..."))
-    started = 0
-    for uid, files in list(user_files.items()):
-        if is_user_banned(uid):
-            continue
-        folder = get_user_folder(uid)
-        for fname, ftype in files:
-            if not is_bot_running(uid, fname):
-                path = os.path.join(folder, fname)
-                if os.path.exists(path):
-                    if ftype == 'py':
-                        threading.Thread(target=run_script, args=(path, uid, folder, fname, message)).start()
-                    else:
-                        threading.Thread(target=run_js_script, args=(path, uid, folder, fname, message)).start()
-                    started += 1
-                    time.sleep(0.5)
-    bot.send_message(message.chat.id, stylish_text(f"✅ Attempted to start {started} scripts."))
-
-# --- Model management commands ---
-@bot.message_handler(commands=['model'])
-def cmd_show_model(message):
-    if not check_subscription_and_continue(message):
-        return
-    bot.reply_to(message, stylish_text(f"🧠 Current AI model: *{global_model}* ({AVAILABLE_MODELS[global_model]})", parse_mode="Markdown"))
-
-@bot.message_handler(commands=['setmodel'])
-def cmd_set_model(message):
-    if not check_subscription_and_continue(message):
-        return
-    user_id = message.from_user.id
-    if user_id not in admin_ids:
-        bot.reply_to(message, stylish_text("⛔ Only admins can change the AI model."))
-        return
-    markup = create_model_selection_markup()
-    bot.reply_to(message, stylish_text("Select a new AI model:"), reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('setmodel_'))
-def set_model_callback(call):
-    user_id = call.from_user.id
-    if user_id not in admin_ids:
-        bot.answer_callback_query(call.id, stylish_text("Not authorized."), show_alert=True)
-        return
-    model_key = call.data.split('_')[1]
-    if model_key in AVAILABLE_MODELS:
-        global global_model
-        global_model = model_key
-        bot.answer_callback_query(call.id, stylish_text(f"✅ Model changed to {model_key.upper()}"))
-        bot.edit_message_text(stylish_text(f"✅ AI model changed to *{model_key}* ({AVAILABLE_MODELS[model_key]})", parse_mode="Markdown"),
-                              call.message.chat.id, call.message.message_id)
-    else:
-        bot.answer_callback_query(call.id, stylish_text("Invalid model."), show_alert=True)
-
-# --- Custom Limit Management (set) ---
-def process_set_user_limit(message):
-    if message.from_user.id not in admin_ids:
-        return
-    text = message.text.strip()
-    if text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    parts = text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, stylish_text("Invalid format. Use: user_id limit\nExample: 123456789 50"))
-        return
-    try:
-        uid = int(parts[0])
-        limit = int(parts[1])
-        if limit < 0:
-            bot.reply_to(message, stylish_text("Limit must be >= 0."))
+    lock = await get_user_action_lock(user.id)
+    async with lock:
+        if await is_premium_active(user.id):
+            await query.answer("✅ You already have Premium active.", show_alert=True)
             return
-    except:
-        bot.reply_to(message, stylish_text("Invalid user ID or limit (must be numbers)."))
-        return
-    set_user_custom_limit(uid, limit)
-    bot.reply_to(message, stylish_text(f"✅ User {uid} now has a custom file limit of {limit}."))
+        ok = await remove_coins(user.id, price, "premium_purchase", f"Bought Premium ({'Lifetime' if days == 0 else f'{days} days'})")
+        if not ok:
+            await query.answer("❌ Not enough Coins for this plan.", show_alert=True)
+            return
+        await grant_premium(user.id, None if days == 0 else days, admin_id=0)
 
-def process_button_label(message, button_id):
-    if message.from_user.id not in admin_ids:
-        return
-    if message.text and message.text.strip().lower() == '/cancel':
-        bot.reply_to(message, stylish_text('❌ Button change cancelled.'))
-        return
-    if not message.text:
-        msg = bot.reply_to(message, stylish_text('❌ Please send text only.'))
-        bot.register_next_step_handler(msg, process_button_label, button_id)
-        return
-    label = message.text.strip()
-    if len(label) > 64:
-        msg = bot.reply_to(message, stylish_text('❌ Button text must be 64 characters or less. Try again.'))
-        bot.register_next_step_handler(msg, process_button_label, button_id)
-        return
-    try:
-        save_button_label(button_id, label)
-        bot.reply_to(message, stylish_text(f'✅ Button updated!\n\n{BUTTON_LABEL_NAMES.get(button_id, button_id)}\n➡️ {label}\n\nUsers will see the new button the next time the main menu is sent.'))
-        bot.send_message(message.chat.id, stylish_text('🔤 Button Manager'), reply_markup=create_button_change_panel())
-    except Exception as e:
-        logger.exception(f'Button label save error: {e}')
-        bot.reply_to(message, stylish_text('❌ Failed to save button text.'))
+    await query.answer("👑 Premium activated!")
+    label = "Lifetime" if days == 0 else f"{days} Days"
+    await query.edit_message_text(
+        f"🎉 <b>Premium Activated!</b>\n\n👑 Plan: <b>{label}</b>\n🪙 Paid: <b>{price} coins</b>\n\n"
+        "Enjoy your Premium badge, bonus multiplier, and priority support!",
+        parse_mode=ParseMode.HTML,
+    )
 
-def reset_all_button_labels():
-    with DB_LOCK:
-        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
-        conn.execute('DELETE FROM button_labels')
-        conn.commit()
-        conn.close()
-    button_labels.clear()
-    button_labels.update(BUTTON_LABEL_DEFAULTS)
 
-# --- Button handlers & command handlers ---
-def get_button_text_to_logic():
-    return {
-        get_button_label('updates'): _logic_updates_channel,
-        get_button_label('upload'): _logic_upload_file,
-        get_button_label('my_files'): _logic_check_files,
-        get_button_label('speed'): _logic_bot_speed,
-        get_button_label('status'): _logic_statistics,
-        get_button_label('restart'): _logic_restart_my_scripts,
-        get_button_label('stop'): _logic_stop_my_scripts,
-        get_button_label('subscription'): _logic_subscriptions_panel,
-        get_button_label('broadcast'): _logic_broadcast_init,
-        get_button_label('lock'): _logic_toggle_lock_bot,
-        get_button_label('run_all'): _logic_run_all_scripts,
-        get_button_label('admin'): _logic_admin_panel,
-        get_button_label('recommended'): _logic_recommended_install,
-        get_button_label('ai'): _logic_ai_assistant,
-        get_button_label('github'): _logic_github_deploy,
-        get_button_label('contact'): _logic_contact_owner,
-        # Keep old labels working for users who still have the old reply keyboard.
-        '📢 𝐔𝐩𝐝𝐚𝐭𝐞𝐬 𝐂𝐡𝐚𝐧𝐧𝐞𝐥': _logic_updates_channel,
-        '💎 𝐔𝐩𝐝𝐚𝐭𝐞𝐬 𝐂𝐡𝐚𝐧𝐧𝐞𝐥': _logic_updates_channel,
-        '🌏 Upload': _logic_upload_file,
-        '💠 Upload': _logic_upload_file,
-        '📁 𝐌𝐲 𝐅𝐢𝐥𝐞𝐬': _logic_check_files,
-        '📂 𝐌𝐲 𝐅𝐢𝐥𝐞𝐬': _logic_check_files,
-        '💫 𝐒𝐭𝐚𝐭𝐮𝐬': _logic_statistics,
-        '🚀 𝐒𝐭𝐚𝐭𝐮𝐬': _logic_statistics,
-        '🔄 𝐑𝐞𝐬𝐭𝐚𝐫𝐭': _logic_restart_my_scripts,
-        '🛑 𝐒𝐭𝐨𝐩': _logic_stop_my_scripts,
-        '💳 𝐒𝐮𝐛𝐬𝐜𝐫𝐢𝐩𝐭𝐢𝐨𝐧𝐬': _logic_subscriptions_panel,
-        '📣 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭': _logic_broadcast_init,
-        '📢 𝐁𝐫𝐨𝐚𝐝𝐜𝐚𝐬𝐭': _logic_broadcast_init,
-        '🔐 𝐋𝐨𝐜𝐤 𝐁𝐨𝐭': _logic_toggle_lock_bot,
-        '🔒 𝐋𝐨𝐜𝐤 𝐁𝐨𝐭': _logic_toggle_lock_bot,
-        '🟢 𝐑𝐮𝐧𝐧𝐢𝐧𝐠 𝐀𝐥𝐥 𝐂𝐨𝐝𝐞': _logic_run_all_scripts,
-        '🛠️ 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥': _logic_admin_panel,
-        '⚙️ Recommended Install': _logic_recommended_install,
-        '🤖 𝐀𝐆𝐄𝐍𝐓': _logic_ai_assistant,
-        '🤖 AI Assistant': _logic_ai_assistant,
-        '🌐 𝐆𝐈𝐓𝐇𝐔𝐁': _logic_github_deploy,
-        '👑 𝐂𝐨𝐧𝐭𝐚𝐜𝐭 𝐎𝐰𝐧𝐞𝐫': _logic_contact_owner,
-        '📞 𝐂𝐨𝐧𝐭𝐚𝐜𝐭 𝐎𝐰𝐧𝐞𝐫': _logic_contact_owner,
-    }
+async def bonus_status_text(user_id: int) -> str:
+    row = await get_user_row(user_id)
+    if row and row["last_bonus_time"]:
+        last = datetime.fromisoformat(row["last_bonus_time"])
+        elapsed = datetime.utcnow() - last
+        if elapsed < timedelta(hours=24):
+            remaining = timedelta(hours=24) - elapsed
+            h, rem = divmod(int(remaining.total_seconds()), 3600)
+            m = rem // 60
+            return f"⏳ Available in {h}h {m}m"
+    return "✅ Available now"
 
-@bot.message_handler(func=lambda m: m.text in get_button_text_to_logic())
-def handle_button_text(message):
-    if not check_subscription_and_continue(message):
-        return
-    action = get_button_text_to_logic().get(message.text)
-    if action:
-        action(message)
 
-@bot.message_handler(commands=['start', 'help'])
-def cmd_start(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_send_welcome(message)
+async def cb_wallet_tx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    page = int(query.data.split(":")[2])
+    per_page = 8
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM transactions WHERE user_id=? ORDER BY tx_id DESC LIMIT ? OFFSET ?",
+            (user.id, per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
 
-@bot.message_handler(commands=['uploadfile'])
-def cmd_upload(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_upload_file(message)
-
-@bot.message_handler(commands=['checkfiles'])
-def cmd_check(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_check_files(message)
-
-@bot.message_handler(commands=['botspeed'])
-def cmd_speed(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_bot_speed(message)
-
-@bot.message_handler(commands=['statistics'])
-def cmd_stats(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_statistics(message)
-
-@bot.message_handler(commands=['broadcast'])
-def cmd_broadcast(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_broadcast_init(message)
-
-@bot.message_handler(commands=['lockbot'])
-def cmd_lock(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_toggle_lock_bot(message)
-
-@bot.message_handler(commands=['adminpanel'])
-def cmd_admin(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_admin_panel(message)
-
-@bot.message_handler(commands=['runningallcode'])
-def cmd_runall(message):
-    if not check_subscription_and_continue(message):
-        return
-    _logic_run_all_scripts(message)
-
-@bot.message_handler(commands=['ping'])
-def ping(message):
-    if not check_subscription_and_continue(message):
-        return
-    start = time.time()
-    m = bot.reply_to(message, stylish_text("Pong!"))
-    latency = round((time.time() - start) * 1000, 2)
-    bot.edit_message_text(stylish_text(f"Pong! {latency} ms"), message.chat.id, m.message_id)
-
-# --- Main Callback Handler ---
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    if call.data.startswith('verify_channel_'):
-        verify_channel_callback(call)
-        return
-    if not check_subscription_and_continue(None, call):
-        return
-    global bot_locked
-    user_id = call.from_user.id
-    data = call.data
-    if bot_locked and user_id not in admin_ids and data not in ['speed', 'stats', 'back_to_main', 'recommended_install', 'ai_assistant', 'updates_channel', 'github_deploy']:
-        bot.answer_callback_query(call.id, stylish_text("Bot locked."), show_alert=True)
-        return
-    if data == 'upload':
-        _logic_upload_file(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'check_files':
-        _logic_check_files(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'speed':
-        _logic_bot_speed(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'stats':
-        _logic_statistics(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'back_to_main':
-        _logic_send_welcome(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'recommended_install':
-        _logic_recommended_install(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'ai_assistant':
-        _logic_ai_assistant(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'updates_channel':
-        _logic_updates_channel(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'github_deploy':
-        _logic_github_deploy(call.message)
-        bot.answer_callback_query(call.id)
-    elif data == 'subscription':
-        if user_id in admin_ids:
-            _logic_subscriptions_panel(call.message)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'broadcast':
-        if user_id in admin_ids:
-            _logic_broadcast_init(call.message)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'lock_bot':
-        if user_id in admin_ids:
-            bot_locked = True
-            bot.answer_callback_query(call.id, stylish_text("Bot locked."))
-            _logic_send_welcome(call.message)
-    elif data == 'unlock_bot':
-        if user_id in admin_ids:
-            bot_locked = False
-            bot.answer_callback_query(call.id, stylish_text("Bot unlocked."))
-            _logic_send_welcome(call.message)
-    elif data == 'run_all_scripts':
-        if user_id in admin_ids:
-            _logic_run_all_scripts(call.message)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'admin_panel':
-        if user_id in admin_ids:
-            _logic_admin_panel(call.message)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'manage_channels':
-        if user_id in admin_ids:
-            bot.edit_message_text(stylish_text('📢 Channel Management'), call.message.chat.id, call.message.message_id, reply_markup=create_channel_management_panel())
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'channel_add':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text('Send channel username or ID.\nExample: @mychannel\nOr: -1001234567890\n/cancel'))
-            bot.register_next_step_handler(msg, process_add_required_channel)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'channel_remove':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text('Send channel username or ID to remove.\n/cancel'))
-            bot.register_next_step_handler(msg, process_remove_required_channel)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'channel_list':
-        if user_id in admin_ids:
-            channels = get_required_channels()
-            text = '📢 Required Channels:\n\n' + '\n'.join(f'{i}. {ch}' for i, ch in enumerate(channels, 1)) if channels else '📢 No required channels configured.'
-            bot.edit_message_text(stylish_text(text), call.message.chat.id, call.message.message_id, reply_markup=create_channel_management_panel())
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'change_buttons':
-        if user_id in admin_ids:
-            bot.edit_message_text(stylish_text('🔤 Button Manager\n\nSelect the user button you want to change:'), call.message.chat.id, call.message.message_id, reply_markup=create_button_change_panel())
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data.startswith('button_select_'):
-        if user_id in admin_ids:
-            button_id = data[len('button_select_'):]
-            if button_id not in BUTTON_LABEL_DEFAULTS:
-                bot.answer_callback_query(call.id, stylish_text('Invalid button.'), show_alert=True)
-                return
-            current = get_button_label(button_id)
-            msg = bot.send_message(call.message.chat.id, stylish_text(f'🔤 Change Button\n\nCurrent text: {current}\n\nSend the new button text now.\n/cancel to cancel.'))
-            bot.register_next_step_handler(msg, process_button_label, button_id)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'button_reset_all':
-        if user_id in admin_ids:
-            reset_all_button_labels()
-            bot.edit_message_text(stylish_text('✅ All button texts reset to default.'), call.message.chat.id, call.message.message_id, reply_markup=create_button_change_panel())
-            bot.answer_callback_query(call.id, stylish_text('Reset complete.'))
-        else:
-            bot.answer_callback_query(call.id, stylish_text('Admin only.'), show_alert=True)
-    elif data == 'change_ai_model':
-        if user_id in admin_ids:
-            markup = create_model_selection_markup()
-            bot.edit_message_text(stylish_text("Select a new AI model:"), call.message.chat.id, call.message.message_id, reply_markup=markup)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data.startswith('setmodel_'):
-        set_model_callback(call)
-    elif data == 'add_admin':
-        if user_id == OWNER_ID:
-            msg = bot.send_message(call.message.chat.id, stylish_text("👑 Enter user ID to add as admin.\n/cancel"))
-            bot.register_next_step_handler(msg, process_add_admin_id)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Owner only."), show_alert=True)
-    elif data == 'remove_admin':
-        if user_id == OWNER_ID:
-            msg = bot.send_message(call.message.chat.id, stylish_text("👑 Enter admin ID to remove.\n/cancel"))
-            bot.register_next_step_handler(msg, process_remove_admin_id)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Owner only."), show_alert=True)
-    elif data == 'list_admins':
-        if user_id in admin_ids:
-            admins_str = "\n".join(f"- {aid} {'(Owner)' if aid == OWNER_ID else ''}" for aid in sorted(admin_ids))
-            bot.send_message(call.message.chat.id, stylish_text(f"👑 Admins:\n{admins_str}"))
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'set_user_limit':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text("🔧 Send user ID and new limit.\nFormat: `123456789 50`\nUse /cancel to abort."), parse_mode='Markdown')
-            bot.register_next_step_handler(msg, process_set_user_limit)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'add_subscription':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text("💳 Enter user_id days (e.g., 12345678 30)\n/cancel"))
-            bot.register_next_step_handler(msg, process_add_subscription)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'remove_subscription':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text("💳 Enter user ID to remove subscription.\n/cancel"))
-            bot.register_next_step_handler(msg, process_remove_subscription)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data == 'check_subscription':
-        if user_id in admin_ids:
-            msg = bot.send_message(call.message.chat.id, stylish_text("💳 Enter user ID to check subscription.\n/cancel"))
-            bot.register_next_step_handler(msg, process_check_subscription)
-            bot.answer_callback_query(call.id)
-        else:
-            bot.answer_callback_query(call.id, stylish_text("Admin only."), show_alert=True)
-    elif data.startswith('confirm_broadcast_'):
-        handle_confirm_broadcast(call)
-    elif data == 'cancel_broadcast':
-        handle_cancel_broadcast(call)
-    elif data.startswith('file_'):
-        file_control_callback(call)
-    elif data.startswith('start_'):
-        start_bot_callback(call)
-    elif data.startswith('stop_'):
-        stop_bot_callback(call)
-    elif data.startswith('restart_'):
-        restart_bot_callback(call)
-    elif data.startswith('delete_'):
-        delete_bot_callback(call)
-    elif data.startswith('logs_'):
-        logs_bot_callback(call)
-    elif data.startswith('aifix_'):
-        ai_fix_callback(call)
-    elif data == 'install_recommended':
-        install_recommended_callback(call)
-    elif data == 'cancel_install':
-        cancel_install_callback(call)
+    if not rows and page == 0:
+        text = "📜 <b>Transactions</b>\n\nNo transactions yet."
     else:
-        bot.answer_callback_query(call.id, stylish_text("Unknown action."))
+        lines = ["📜 <b>Transactions</b>\n"]
+        for r in rows:
+            sign = "+" if r["amount"] >= 0 else ""
+            lines.append(
+                f"{'🟢' if r['amount']>=0 else '🔴'} {sign}{r['amount']} 🪙 — {html.escape(r['tx_type'])} "
+                f"<i>({fmt_date(r['timestamp'])})</i>"
+            )
+        text = "\n".join(lines)
 
-# --- Admin & Subscription processing helpers ---
-def process_add_admin_id(message):
-    if message.from_user.id != OWNER_ID:
-        return
-    if message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    try:
-        aid = int(message.text.strip())
-        if aid == OWNER_ID:
-            bot.reply_to(message, stylish_text("Owner is already admin."))
-            return
-        add_admin_db(aid)
-        bot.reply_to(message, stylish_text(f"✅ User {aid} is now admin."))
-    except:
-        bot.reply_to(message, stylish_text("Invalid ID. Use numeric ID."))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"wallet:tx:{page-1}", style="primary"))
+    if len(rows) == per_page:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"wallet:tx:{page+1}", style="primary"))
+    buttons = [nav] if nav else []
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="wallet:home", style="primary")])
+    await query.answer()
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
 
-def process_remove_admin_id(message):
-    if message.from_user.id != OWNER_ID:
-        return
-    if message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    try:
-        aid = int(message.text.strip())
-        if aid == OWNER_ID:
-            bot.reply_to(message, stylish_text("Cannot remove owner."))
-            return
-        if remove_admin_db(aid):
-            bot.reply_to(message, stylish_text(f"✅ Admin {aid} removed."))
-        else:
-            bot.reply_to(message, stylish_text("User was not admin."))
-    except:
-        bot.reply_to(message, stylish_text("Invalid ID."))
 
-def process_add_subscription(message):
-    if message.from_user.id not in admin_ids:
-        return
-    if message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    try:
-        parts = message.text.split()
-        uid = int(parts[0])
-        days = int(parts[1])
-        current = user_subscriptions.get(uid, {}).get('expiry')
-        start = current if current and current > datetime.now() else datetime.now()
-        new_expiry = start + timedelta(days=days)
-        save_subscription(uid, new_expiry)
-        bot.reply_to(message, stylish_text(f"✅ Subscription for {uid} added. Expires {new_expiry.strftime('%Y-%m-%d')}"))
-    except:
-        bot.reply_to(message, stylish_text("Invalid format. Use user_id days"))
+async def cb_wallet_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+    await send_wallet_view(update, context, edit=True)
 
-def process_remove_subscription(message):
-    if message.from_user.id not in admin_ids:
-        return
-    if message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    try:
-        uid = int(message.text.strip())
-        if uid in user_subscriptions:
-            remove_subscription_db(uid)
-            bot.reply_to(message, stylish_text(f"✅ Subscription removed for {uid}"))
-        else:
-            bot.reply_to(message, stylish_text("User has no active subscription."))
-    except:
-        bot.reply_to(message, stylish_text("Invalid user ID."))
 
-def process_check_subscription(message):
-    if message.from_user.id not in admin_ids:
-        return
-    if message.text.lower() == '/cancel':
-        bot.reply_to(message, stylish_text("Cancelled."))
-        return
-    try:
-        uid = int(message.text.strip())
-        if uid in user_subscriptions:
-            exp = user_subscriptions[uid]['expiry']
-            if exp > datetime.now():
-                days = (exp - datetime.now()).days
-                bot.reply_to(message, stylish_text(f"✅ User {uid} has active sub. Expires {exp.strftime('%Y-%m-%d')} ({days} days left)"))
+
+async def cb_buycoins_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    packages = json.loads(await get_setting("coin_packages", "[]"))
+    payment_username = await get_setting("payment_username", "ARMAAN_x7x")
+    lines = ["⭐ <b>Buy Coins — Manual Stars Payment</b>\n"]
+    for i, p in enumerate(packages):
+        lines.append(f"🪙 {p['coins']} Coins = ⭐ {p['stars']} Stars")
+    lines.append(f"\nSend Stars To: <b>@{html.escape(payment_username)}</b>")
+    lines.append("\nAfter sending, tap <b>⭐ I Have Paid</b> below.")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ I Have Paid", callback_data="buycoins:paid", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data="wallet:home", style="primary")],
+    ])
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def cb_buycoins_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "⭐ How many Stars did you send? (numbers only)",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="buycoins:cancel", style="primary")]]),
+    )
+    return BC_STARS
+
+
+async def conv_buycoins_stars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("❌ Please send a valid number of Stars.")
+        return BC_STARS
+    context.user_data["bc_stars"] = int(text)
+    await update.message.reply_text("📷 Please send your payment screenshot now.")
+    return BC_SCREENSHOT
+
+
+async def conv_buycoins_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message.photo and not update.message.document:
+        await update.message.reply_text("❌ Please send a screenshot as a photo or document.")
+        return BC_SCREENSHOT
+
+    file_id = update.message.photo[-1].file_id if update.message.photo else update.message.document.file_id
+    stars = context.user_data.pop("bc_stars")
+    user = update.effective_user
+
+    async with db_conn() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM payments WHERE user_id=? AND status='pending'", (user.id,)
+        )
+        if await cur.fetchone():
+            await update.message.reply_text(
+                "⚠️ You already have a pending payment request. Please wait for admin review."
+            )
+            return ConversationHandler.END
+
+        packages = json.loads(await get_setting("coin_packages", "[]"))
+        coins = 0
+        for p in packages:
+            if p["stars"] == stars:
+                coins = p["coins"]
+                break
+        if coins == 0:
+            rate = float(await get_setting("star_rate", "30"))
+            coins = int(stars * rate / 30 * 100)
+
+        await db.execute(
+            "INSERT INTO payments (user_id, stars, coins, screenshot_file_id, status, timestamp) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (user.id, stars, coins, file_id, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid()")
+        payment_id = (await cur.fetchone())[0]
+
+    await update.message.reply_text(
+        "✅ Your payment request has been submitted. You'll be notified once reviewed."
+    )
+
+    uname = f"@{user.username}" if user.username else "—"
+    caption = (
+        "💰 <b>New Payment Request</b>\n\n"
+        f"👤 Username: {html.escape(uname)}\n"
+        f"🆔 User ID: <code>{user.id}</code>\n"
+        f"⭐ Stars: <b>{stars}</b>\n"
+        f"🪙 Coins: <b>{coins}</b>\n"
+        f"📅 Time: {fmt_date(datetime.utcnow().isoformat())}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Accept", callback_data=f"pay:accept:{payment_id}", style="primary"),
+         InlineKeyboardButton("❌ Reject", callback_data=f"pay:reject:{payment_id}", style="primary")]
+    ])
+    admin_ids = [OWNER_ID]
+    for admin_id in admin_ids:
+        try:
+            if update.message.photo:
+                await context.bot.send_photo(admin_id, file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
             else:
-                bot.reply_to(message, stylish_text(f"⚠️ User {uid} subscription expired on {exp.strftime('%Y-%m-%d')}"))
-        else:
-            bot.reply_to(message, stylish_text(f"ℹ️ User {uid} has no subscription."))
-    except:
-        bot.reply_to(message, stylish_text("Invalid user ID."))
-
-# --- File control callbacks ---
-def file_control_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("You can only manage your own files."), show_alert=True)
-            _logic_check_files(call.message)
-            return
-        files = user_files.get(owner_id, [])
-        if not any(f[0] == file_name for f in files):
-            bot.answer_callback_query(call.id, stylish_text("File not found."), show_alert=True)
-            _logic_check_files(call.message)
-            return
-        is_running = is_bot_running(owner_id, file_name)
-        ftype = next((f[1] for f in files if f[0] == file_name), '?')
-        text = f"⚙️ Controls for {file_name} ({ftype}) of User {owner_id}\nStatus: {'🟢 Running' if is_running else '🔴 Stopped'}"
-        bot.edit_message_text(stylish_text(text), call.message.chat.id, call.message.message_id,
-                              reply_markup=create_control_buttons(owner_id, file_name, is_running))
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        logger.error(f"file_control error: {e}")
-
-def start_bot_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
-            return
-        if is_bot_running(owner_id, file_name):
-            bot.answer_callback_query(call.id, stylish_text("Already running."), show_alert=True)
-            return
-        files = user_files.get(owner_id, [])
-        ftype = next((f[1] for f in files if f[0] == file_name), None)
-        if not ftype:
-            bot.answer_callback_query(call.id, stylish_text("File not found."), show_alert=True)
-            return
-        folder = get_user_folder(owner_id)
-        path = os.path.join(folder, file_name)
-        if not os.path.exists(path):
-            bot.answer_callback_query(call.id, stylish_text("File missing."), show_alert=True)
-            return
-        bot.answer_callback_query(call.id, stylish_text(f"Starting {file_name}..."))
-        if ftype == 'py':
-            threading.Thread(target=run_script, args=(path, owner_id, folder, file_name, call.message)).start()
-        else:
-            threading.Thread(target=run_js_script, args=(path, owner_id, folder, file_name, call.message)).start()
-        time.sleep(1)
-        is_running = is_bot_running(owner_id, file_name)
-        text = f"⚙️ Controls for {file_name} ({ftype}) of User {owner_id}\nStatus: {'🟢 Running' if is_running else '🟡 Starting...'}"
-        bot.edit_message_text(stylish_text(text), call.message.chat.id, call.message.message_id,
-                              reply_markup=create_control_buttons(owner_id, file_name, is_running))
-    except Exception as e:
-        logger.error(f"start error: {e}")
-
-def stop_bot_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
-            return
-        if not is_bot_running(owner_id, file_name):
-            bot.answer_callback_query(call.id, stylish_text("Not running."), show_alert=True)
-            return
-        script_key = f"{owner_id}_{file_name}"
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-        bot.answer_callback_query(call.id, stylish_text(f"Stopped {file_name}."))
-        files = user_files.get(owner_id, [])
-        ftype = next((f[1] for f in files if f[0] == file_name), '?')
-        text = f"⚙️ Controls for {file_name} ({ftype}) of User {owner_id}\nStatus: 🔴 Stopped"
-        bot.edit_message_text(stylish_text(text), call.message.chat.id, call.message.message_id,
-                              reply_markup=create_control_buttons(owner_id, file_name, False))
-    except Exception as e:
-        logger.error(f"stop error: {e}")
-
-def restart_bot_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
-            return
-        script_key = f"{owner_id}_{file_name}"
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-        time.sleep(1)
-        files = user_files.get(owner_id, [])
-        ftype = next((f[1] for f in files if f[0] == file_name), None)
-        if not ftype:
-            bot.answer_callback_query(call.id, stylish_text("File not found."), show_alert=True)
-            return
-        folder = get_user_folder(owner_id)
-        path = os.path.join(folder, file_name)
-        if not os.path.exists(path):
-            bot.answer_callback_query(call.id, stylish_text("File missing."), show_alert=True)
-            return
-        bot.answer_callback_query(call.id, stylish_text(f"Restarting {file_name}..."))
-        if ftype == 'py':
-            threading.Thread(target=run_script, args=(path, owner_id, folder, file_name, call.message)).start()
-        else:
-            threading.Thread(target=run_js_script, args=(path, owner_id, folder, file_name, call.message)).start()
-        time.sleep(1)
-        is_running = is_bot_running(owner_id, file_name)
-        text = f"⚙️ Controls for {file_name} ({ftype}) of User {owner_id}\nStatus: {'🟢 Running' if is_running else '🟡 Starting...'}"
-        bot.edit_message_text(stylish_text(text), call.message.chat.id, call.message.message_id,
-                              reply_markup=create_control_buttons(owner_id, file_name, is_running))
-    except Exception as e:
-        logger.error(f"restart error: {e}")
-
-def delete_bot_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
-            return
-        script_key = f"{owner_id}_{file_name}"
-        if script_key in bot_scripts:
-            kill_process_tree(bot_scripts[script_key])
-            del bot_scripts[script_key]
-        folder = get_user_folder(owner_id)
-        file_path = os.path.join(folder, file_name)
-        log_path = os.path.join(folder, f"{os.path.splitext(file_name)[0]}.log")
-        for p in (file_path, log_path):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except:
-                    pass
-        remove_user_file_db(owner_id, file_name)
-        bot.answer_callback_query(call.id, stylish_text(f"Deleted {file_name}."))
-        bot.edit_message_text(stylish_text(f"🗑️ Deleted {file_name} (User {owner_id})"), call.message.chat.id, call.message.message_id)
-    except Exception as e:
-        logger.error(f"delete error: {e}")
-
-def logs_bot_callback(call):
-    try:
-        _, owner_id_str, file_name = call.data.split('_', 2)
-        owner_id = int(owner_id_str)
-        if call.from_user.id != owner_id and call.from_user.id not in admin_ids:
-            bot.answer_callback_query(call.id, stylish_text("Permission denied."), show_alert=True)
-            return
-        folder = get_user_folder(owner_id)
-        log_path = os.path.join(folder, f"{os.path.splitext(file_name)[0]}.log")
-        if not os.path.exists(log_path):
-            bot.answer_callback_query(call.id, stylish_text("No logs yet."), show_alert=True)
-            return
-        with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-            logs = f.read()
-        if len(logs) > 4000:
-            logs = logs[-4000:]
-            logs = "...\n" + logs
-        bot.send_message(call.message.chat.id, stylish_text(f"📜 Logs for {file_name}:\n{logs}"))
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        logger.error(f"logs error: {e}")
-        bot.answer_callback_query(call.id, stylish_text("Error reading logs."), show_alert=True)
-
-# --- Cleanup and Main ---
-def cleanup():
-    logger.warning("Shutting down, killing all scripts...")
-    for key, info in list(bot_scripts.items()):
-        kill_process_tree(info)
-    logger.warning("Cleanup done.")
-atexit.register(cleanup)
-
-# ======================= RENDER WEBHOOK + HEALTH SERVER =======================
-# On Render Web Service, Telegram webhooks are used instead of polling.
-# This lets Telegram send updates directly to the public Render URL.
-if Flask is not None:
-    app = Flask(__name__)
-
-    @app.get('/')
-    def health():
-        return 'HOST is running', 200
-
-    @app.get('/health')
-    def health_check():
-        return {'status': 'ok', 'bot': 'host'}, 200
-
-    # Stable private-looking path derived from the bot token.
-    # The actual token is NOT put in the URL.
-    WEBHOOK_PATH = '/telegram/' + __import__('hashlib').sha256(TOKEN.encode()).hexdigest()[:32]
-
-    @app.post(WEBHOOK_PATH)
-    def telegram_webhook():
-        try:
-            raw = request.get_data(as_text=True)
-            if not raw:
-                return 'empty', 400
-            update = types.Update.de_json(raw)
-            if update is not None:
-                bot.process_new_updates([update])
-            return 'ok', 200
-        except Exception as e:
-            logger.exception(f'Telegram webhook error: {e}')
-            # Return 200 so Telegram does not endlessly retry malformed updates.
-            return 'ok', 200
-
-    def start_health_server():
-        try:
-            port = int(os.environ.get('PORT', '10000'))
-            app.run(host='0.0.0.0', port=port, use_reloader=False, threaded=True)
-        except Exception as e:
-            logger.exception(f'Health/webhook server error: {e}')
-else:
-    app = None
-    WEBHOOK_PATH = None
-
-    def start_health_server():
-        logger.info('Flask is not installed; health/webhook server disabled.')
+                await context.bot.send_document(admin_id, file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError:
+            pass
+    return ConversationHandler.END
 
 
-def setup_render_webhook():
-    """Configure Telegram webhook automatically when running on Render."""
-    if Flask is None or not os.environ.get('RENDER'):
-        return False
-
-    base_url = os.environ.get('RENDER_EXTERNAL_URL')
-    if not base_url:
-        hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
-        if hostname:
-            base_url = f'https://{hostname}'
-
-    if not base_url:
-        logger.warning('Render public URL not available; falling back to polling.')
-        return False
-
-    webhook_url = base_url.rstrip('/') + WEBHOOK_PATH
-    try:
-        bot.delete_webhook(drop_pending_updates=False)
-        bot.set_webhook(url=webhook_url, max_connections=40)
-        logger.info(f'Telegram webhook configured: {base_url}{WEBHOOK_PATH}')
-        return True
-    except Exception as e:
-        logger.exception(f'Webhook setup failed: {e}')
-        return False
+async def cb_buycoins_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    context.user_data.pop("bc_stars", None)
+    return ConversationHandler.END
 
 
-def start_bot_polling():
-    """Fallback polling for Termux/local/non-Render hosting."""
-    try:
-        bot.delete_webhook(drop_pending_updates=False)
-    except Exception as e:
-        logger.warning(f'Webhook cleanup skipped: {e}')
 
-    while True:
-        try:
-            logger.info('Telegram polling started.')
-            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-        except KeyboardInterrupt:
-            logger.info('Bot stopped by user.')
-            break
-        except Exception as e:
-            logger.exception(f'Polling error: {e}')
-            logger.info('Polling will retry in 5 seconds without process restart.')
-            time.sleep(5)
+async def handle_buy_coins_bdt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query:
+        await update.callback_query.answer()
+    if not await guard_user(update, context):
+        return
+    rate = await get_setting("coin_rate_bdt", "5")
+    details = await get_setting("bdt_payment_details", "")
+    text = (
+        "💵 <b>Buy Coins with Taka (৳)</b>\n"
+        f"{DIVIDER}\n"
+        f"💱 Rate: <b>1 ৳ = {html.escape(rate)} Coins</b>\n\n"
+        f"{html.escape(details)}\n\n"
+        "Send the amount via bKash/Nagad (Send Money), then tap <b>💵 I Have Paid</b> below."
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💵 I Have Paid", callback_data="buybdt:paid", style="primary")]])
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
-def start_bot():
-    logger.info('HOST starting...')
+async def cb_buybdt_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "💵 How many Taka (৳) did you send? (numbers only)",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="buybdt:cancel", style="primary")]]),
+    )
+    return BDT_AMOUNT
 
-    # Render Web Service: webhook mode. Local/Termux: polling mode.
-    if setup_render_webhook():
-        logger.info('Running in Render webhook mode; polling is disabled.')
-        # Keep the main process alive while Flask serves webhook requests.
-        while True:
-            time.sleep(60)
+
+async def conv_buybdt_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("❌ Please send a valid Taka amount.")
+        return BDT_AMOUNT
+    context.user_data["bdt_amount"] = int(text)
+    await update.message.reply_text(
+        "📷 Please send your payment screenshot now — or type your bKash/Nagad Transaction ID as text."
+    )
+    return BDT_PROOF
+
+
+async def conv_buybdt_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    amount = context.user_data.pop("bdt_amount", None)
+    if amount is None:
+        await update.message.reply_text("❌ Something went wrong — please start again from 💵 Buy Coins (৳).")
+        return ConversationHandler.END
+
+    file_id = None
+    is_photo = False
+    txn_text = None
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        is_photo = True
+    elif update.message.document:
+        file_id = update.message.document.file_id
+    elif update.message.text:
+        txn_text = update.message.text.strip()
     else:
-        start_bot_polling()
+        await update.message.reply_text("❌ Please send a screenshot, or type your Transaction ID as text.")
+        return BDT_PROOF
+
+    user = update.effective_user
+
+    async with db_conn() as db:
+        cur = await db.execute("SELECT 1 FROM payments WHERE user_id=? AND status='pending'", (user.id,))
+        if await cur.fetchone():
+            await update.message.reply_text("⚠️ You already have a pending payment request. Please wait for admin review.")
+            return ConversationHandler.END
+
+        rate = float(await get_setting("coin_rate_bdt", "5"))
+        coins = int(amount * rate)
+
+        await db.execute(
+            "INSERT INTO payments (user_id, coins, screenshot_file_id, status, timestamp, payment_method, amount_bdt) "
+            "VALUES (?, ?, ?, 'pending', ?, 'bdt', ?)",
+            (user.id, coins, file_id, datetime.utcnow().isoformat(), amount),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT last_insert_rowid()")
+        payment_id = (await cur.fetchone())[0]
+
+    await update.message.reply_text("✅ Your payment request has been submitted. You'll be notified once reviewed.")
+
+    uname = f"@{user.username}" if user.username else "—"
+    txn_note = f"\n🧾 Transaction ID: <code>{html.escape(txn_text)}</code>" if txn_text else ""
+    caption = (
+        "💵 <b>New BDT Payment Request</b>\n\n"
+        f"👤 Username: {html.escape(uname)}\n"
+        f"🆔 User ID: <code>{user.id}</code>\n"
+        f"💵 Amount: <b>৳{amount}</b>\n"
+        f"🪙 Coins: <b>{coins}</b>{txn_note}\n"
+        f"📅 Time: {fmt_date(datetime.utcnow().isoformat())}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Accept", callback_data=f"pay:accept:{payment_id}", style="primary"),
+         InlineKeyboardButton("❌ Reject", callback_data=f"pay:reject:{payment_id}", style="primary")]
+    ])
+    admin_ids = [OWNER_ID]
+    for admin_id in admin_ids:
+        try:
+            if file_id and is_photo:
+                await context.bot.send_photo(admin_id, file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+            elif file_id:
+                await context.bot.send_document(admin_id, file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+            else:
+                await context.bot.send_message(admin_id, caption, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError:
+            pass
+    return ConversationHandler.END
 
 
-if __name__ == '__main__':
-    if Flask is not None:
-        threading.Thread(target=start_health_server, daemon=True).start()
-        time.sleep(2)
-    start_bot()
+async def cb_buybdt_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    context.user_data.pop("bdt_amount", None)
+    return ConversationHandler.END
+
+
+async def get_all_admin_ids() -> list[int]:
+    ids = {OWNER_ID}
+    async with db_conn() as db:
+        cur = await db.execute("SELECT user_id FROM admins")
+        rows = await cur.fetchall()
+        for r in rows:
+            ids.add(r[0])
+    return list(ids)
+
+
+async def get_admin_role(user_id: int) -> str | None:
+    """Returns 'owner', 'senior', 'junior', or None (not an admin)."""
+    if user_id == OWNER_ID:
+        return "owner"
+    async with db_conn() as db:
+        cur = await db.execute("SELECT role FROM admins WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def log_admin_action(bot, actor_id: int, action_text: str) -> None:
+    """Audit trail with a Senior/Junior hierarchy:
+    - Junior admin actions -> notify Owner + all Senior admins.
+    - Senior admin actions -> notify Owner only.
+    - Owner's own actions -> no notification needed.
+    Every action (including the Owner's own) is persisted to admin_logs for
+    the browsable Action Log Viewer."""
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO admin_logs (actor_id, action_text, timestamp) VALUES (?, ?, ?)",
+            (actor_id, action_text, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+
+    if actor_id == OWNER_ID:
+        return
+    role = await get_admin_role(actor_id)
+    actor_row = await get_user_row(actor_id)
+    actor_label = f"@{actor_row['username']}" if actor_row and actor_row["username"] else str(actor_id)
+    role_tag = f" [{role}]" if role else ""
+    text = f"📋 <b>Admin Action</b>\n\n👤 By: {html.escape(actor_label)}{role_tag} (<code>{actor_id}</code>)\n{action_text}"
+
+    recipients = {OWNER_ID}
+    if role == "junior":
+        async with db_conn() as db:
+            cur = await db.execute("SELECT user_id FROM admins WHERE role='senior'")
+            for r in await cur.fetchall():
+                recipients.add(r[0])
+
+    for uid in recipients:
+        try:
+            await bot.send_message(uid, text, parse_mode=ParseMode.HTML)
+        except TelegramError:
+            pass
+
+
+async def cb_payment_accept(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    admin = update.effective_user
+    if not await require_owner(update):
+        return
+    payment_id = int(query.data.split(":")[2])
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM payments WHERE payment_id=?", (payment_id,))
+        payment = await cur.fetchone()
+        if not payment or payment["status"] != "pending":
+            await query.answer("⚠️ Already processed.", show_alert=True)
+            return
+        await db.execute(
+            "UPDATE payments SET status='accepted', admin_id=? WHERE payment_id=?",
+            (admin.id, payment_id),
+        )
+        await db.commit()
+
+    method_note = f"({payment['stars']} stars)" if payment["payment_method"] != "bdt" else f"(৳{payment['amount_bdt']})"
+    await add_coins(payment["user_id"], payment["coins"], "payment", f"Payment accepted {method_note}")
+    await query.answer("✅ Accepted")
+    try:
+        await query.message.delete()
+    except (BadRequest, TelegramError):
+        pass
+    try:
+        await context.bot.send_message(
+            payment["user_id"],
+            f"✅ <b>Payment Accepted!</b>\n🪙 {payment['coins']} Coins have been added to your wallet.",
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError:
+        pass
+    await log_admin_action(context.bot, admin.id, f"✅ Accepted payment #{payment_id} for user {payment['user_id']} ({payment['coins']} coins)")
+
+
+async def cb_payment_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    admin = update.effective_user
+    if not await require_owner(update):
+        return
+    payment_id = int(query.data.split(":")[2])
+    context.user_data["reject_payment_id"] = payment_id
+    context.user_data["reject_chat_msg"] = (query.message.chat_id, query.message.message_id)
+    await query.answer()
+    await query.message.reply_text(
+        "✏️ Enter rejection reason (or send - to skip):"
+    )
+    context.user_data["awaiting_reject_reason"] = True
+
+
+async def handle_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.user_data.get("awaiting_reject_reason"):
+        return
+    context.user_data["awaiting_reject_reason"] = False
+    reason = update.message.text.strip()
+    reason = "" if reason == "-" else reason
+    payment_id = context.user_data.pop("reject_payment_id")
+    reject_chat_msg = context.user_data.pop("reject_chat_msg", None)
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM payments WHERE payment_id=?", (payment_id,))
+        payment = await cur.fetchone()
+        if not payment or payment["status"] != "pending":
+            await update.message.reply_text("⚠️ Already processed.")
+            return
+        await db.execute(
+            "UPDATE payments SET status='rejected', admin_id=?, reason=? WHERE payment_id=?",
+            (update.effective_user.id, reason, payment_id),
+        )
+        await db.commit()
+
+    await update.message.reply_text("❌ Payment rejected and user notified.")
+    if reject_chat_msg:
+        try:
+            await context.bot.delete_message(chat_id=reject_chat_msg[0], message_id=reject_chat_msg[1])
+        except TelegramError:
+            pass
+    try:
+        msg = "❌ <b>Payment Rejected</b>"
+        if reason:
+            msg += f"\nReason: {html.escape(reason)}"
+        await context.bot.send_message(payment["user_id"], msg, parse_mode=ParseMode.HTML)
+    except TelegramError:
+        pass
+    await log_admin_action(
+        context.bot, update.effective_user.id,
+        f"❌ Rejected payment #{payment_id} for user {payment['user_id']}" + (f"\nReason: {html.escape(reason)}" if reason else "")
+    )
+
+
+
+async def handle_daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    user = update.effective_user
+    lock = await get_user_action_lock(user.id)
+    async with lock:
+        row = await get_user_row(user.id)
+        if row and row["last_bonus_time"]:
+            last = datetime.fromisoformat(row["last_bonus_time"])
+            elapsed = datetime.utcnow() - last
+            if elapsed < timedelta(hours=24):
+                remaining = timedelta(hours=24) - elapsed
+                h, rem = divmod(int(remaining.total_seconds()), 3600)
+                m = rem // 60
+                await update.effective_message.reply_text(
+                    f"⏳ <b>Daily Bonus Already Claimed</b>\nCome back in <b>{h}h {m}m</b>.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+        premium = await is_premium_active(user.id)
+        if premium:
+            reward = int(await get_setting("premium_daily_bonus", "40"))
+            tx_label = "Premium daily bonus claim"
+        else:
+            reward = int(await get_setting("daily_bonus", "25"))
+            tx_label = "Daily bonus claim"
+        await add_coins(user.id, reward, "daily_bonus", tx_label)
+        async with db_conn() as db:
+            await db.execute(
+                "UPDATE users SET last_bonus_time=? WHERE user_id=?",
+                (datetime.utcnow().isoformat(), user.id),
+            )
+            await db.commit()
+    badge = "\n👑 <i>Premium Daily Bonus</i>" if premium else ""
+    await update.effective_message.reply_text(
+        f"🎁 <b>Daily Bonus Claimed!</b>\n🪙 You received <b>{reward} Coins</b>.{badge}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+
+async def _spins_left(user_id: int) -> int:
+    row = await get_user_row(user_id)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    used = row["spin_count_today"] if row and row["spin_reset_date"] == today else 0
+    limit = 2 if await is_premium_active(user_id) else 1
+    return max(0, limit - used)
+
+
+async def handle_daily_spin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    user = update.effective_user
+    left = await _spins_left(user.id)
+    limit = 2 if await is_premium_active(user.id) else 1
+    text = (
+        "🎰 <b>Daily Spin</b>\n"
+        f"{DIVIDER}\n"
+        f"🎁 Coins (small): <b>50%</b>\n"
+        f"💰 Coins (big): <b>25%</b>\n"
+        f"📁 Random File: <b>10%</b>\n"
+        f"👑 7-Day Premium: <b>15%</b>\n"
+        f"{DIVIDER}\n"
+        f"🔄 Spins left today: <b>{left}/{limit}</b>"
+    )
+    if left <= 0:
+        kb = None
+        text += "\n\n⏳ Come back tomorrow for more spins!"
+    else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎰 SPIN NOW", callback_data="spin:go", style="success")]])
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_spin_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    lock = await get_user_action_lock(user.id)
+
+    async with lock:
+        left = await _spins_left(user.id)
+        if left <= 0:
+            await query.answer("⏳ No spins left today — come back tomorrow!", show_alert=True)
+            return
+        await query.answer()
+
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        row = await get_user_row(user.id)
+        used_today = row["spin_count_today"] if row and row["spin_reset_date"] == today else 0
+        async with db_conn() as db:
+            await db.execute(
+                "UPDATE users SET spin_count_today=?, spin_reset_date=? WHERE user_id=?",
+                (used_today + 1, today, user.id),
+            )
+            await db.commit()
+
+        symbols = ["🍒", "🍋", "🍇", "🍉", "🍊", "⭐", "💎", "7️⃣"]
+
+        def render_reels(reel, locked, caption):
+            row = "│".join(f"  {s}  " for s in reel)
+            marks = "".join(("🔒" if locked[i] else "  ") for i in range(3))
+            return (
+                f"🎰 <b>DAILY SPIN</b> 🎰\n{DIVIDER}\n\n"
+                f"   ┌─────┬─────┬─────┐\n"
+                f"   │{row}│\n"
+                f"   └─────┴─────┴─────┘\n"
+                f"     {marks}\n\n"
+                f"<i>{caption}</i>"
+            )
+
+        try:
+            await query.edit_message_text(
+                f"🎰 <b>DAILY SPIN</b> 🎰\n{DIVIDER}\n\n"
+                f"   ┌─────┬─────┬─────┐\n"
+                f"   │  ❔  │  ❔  │  ❔  │\n"
+                f"   └─────┴─────┴─────┘\n\n"
+                f"<i>🎲 Pulling the lever...</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        except (BadRequest, TelegramError):
+            pass
+        await asyncio.sleep(0.5)
+
+        frame_count = 16
+        reel = [random.choice(symbols) for _ in range(3)]
+        locked = [False, False, False]
+
+        for i in range(frame_count):
+            progress = i / frame_count
+            if progress > 0.55:
+                locked[0] = True
+            if progress > 0.75:
+                locked[1] = True
+            if progress > 0.92:
+                locked[2] = True
+            for j in range(3):
+                if not locked[j]:
+                    reel[j] = random.choice(symbols)
+
+            if progress < 0.55:
+                caption = "🌀 Spinning" + "." * (1 + i % 3)
+            elif progress < 0.85:
+                caption = "⏳ Almost there..."
+            else:
+                caption = "🔥 Revealing..."
+
+            try:
+                await query.edit_message_text(render_reels(reel, locked, caption), parse_mode=ParseMode.HTML)
+            except (BadRequest, TelegramError):
+                pass
+            await asyncio.sleep(0.18 + (progress ** 2) * 0.4)
+
+        await asyncio.sleep(0.3)
+
+        cfg = json.loads(await get_setting("spin_settings", "{}"))
+        roll = random.uniform(0, 100)
+        luck = random.randint(1, 100)
+        c_low = cfg.get("chance_coins_low", 50)
+        c_high = cfg.get("chance_coins_high", 25)
+        c_file = cfg.get("chance_file", 10)
+
+        if roll < c_low:
+            win_symbol, category = "🍒", "coins_low"
+        elif roll < c_low + c_high:
+            win_symbol, category = "7️⃣", "coins_high"
+        elif roll < c_low + c_high + c_file:
+            win_symbol, category = "⭐", "file"
+        else:
+            win_symbol, category = "💎", "premium"
+
+        try:
+            await query.edit_message_text(
+                render_reels([win_symbol] * 3, [True, True, True], "🎉 <b>JACKPOT LOCKED IN!</b> 🎉"),
+                parse_mode=ParseMode.HTML,
+            )
+        except (BadRequest, TelegramError):
+            pass
+        await asyncio.sleep(0.6)
+
+        if category == "coins_low":
+            amount = random.randint(cfg.get("coins_low_min", 20), cfg.get("coins_low_max", 140))
+            await add_coins(user.id, amount, "daily_spin", f"Daily spin win: {amount} coins")
+            result = f"🪙 <b>You won {amount} Coins!</b>"
+        elif category == "coins_high":
+            amount = random.randint(cfg.get("coins_high_min", 150), cfg.get("coins_high_max", 300))
+            await add_coins(user.id, amount, "daily_spin", f"Daily spin win: {amount} coins")
+            result = f"💰 <b>Jackpot! You won {amount} Coins!</b>"
+        elif category == "file":
+            async with db_conn() as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT * FROM files WHERE is_deleted=0 AND price>0 ORDER BY RANDOM() LIMIT 1"
+                )
+                f = await cur.fetchone()
+                if not f:
+                    cur = await db.execute("SELECT * FROM files WHERE is_deleted=0 ORDER BY RANDOM() LIMIT 1")
+                    f = await cur.fetchone()
+            if f:
+                async with db_conn() as db:
+                    await db.execute(
+                        "INSERT INTO purchases (user_id, file_pk, price, timestamp) VALUES (?, ?, 0, ?)",
+                        (user.id, f["file_pk"], datetime.utcnow().isoformat()),
+                    )
+                    await db.commit()
+                result = f"📁 <b>You won a file!</b>\n{html.escape(f['file_name'])}"
+            else:
+                amount = random.randint(cfg.get("coins_low_min", 20), cfg.get("coins_low_max", 140))
+                await add_coins(user.id, amount, "daily_spin", "Daily spin fallback (no files available)")
+                result = f"🪙 <b>You won {amount} Coins!</b> (no files were available)"
+        else:
+            days = cfg.get("premium_days", 7)
+            await grant_premium(user.id, days, admin_id=0)
+            result = f"👑 <b>You won {days} Days of Premium!</b>"
+
+        final_text = (
+            f"🎊 <b>SPIN RESULT</b> 🎊\n{DIVIDER}\n\n"
+            f"   ┌─────┬─────┬─────┐\n"
+            f"   │  {win_symbol}  │  {win_symbol}  │  {win_symbol}  │\n"
+            f"   └─────┴─────┴─────┘\n\n"
+            f"{result}\n\n"
+            f"🍀 Your Luck: <b>{luck}%</b>\n{DIVIDER}"
+        )
+        try:
+            await query.edit_message_text(final_text, parse_mode=ParseMode.HTML)
+        except (BadRequest, TelegramError):
+            await query.message.reply_text(final_text, parse_mode=ParseMode.HTML)
+
+
+
+async def handle_mystery_box(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    pricing = json.loads(await get_setting("mystery_box_pricing", "[]"))
+    balance = await get_balance(update.effective_user.id)
+    lines = [f"🎁 <b>Mystery Box</b>\n{DIVIDER}", f"🪙 Your balance: <b>{balance}</b>\n"]
+    buttons = []
+    for p in pricing:
+        lines.append(f"{p['label']} — 🪙 {p['price']}")
+        buttons.append([InlineKeyboardButton(
+            f"{p['label']} ({p['price']} coins)", callback_data=f"mystery:open:{p['tier']}:{p['price']}", style="success"
+        )])
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def cb_mystery_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    _, _, tier, price = query.data.split(":")
+    price = int(price)
+    lock = await get_user_action_lock(user.id)
+
+    async with lock:
+        ok = await remove_coins(user.id, price, "mystery_box", f"Opened {tier} mystery box")
+        if not ok:
+            await query.answer("❌ Not enough coins.", show_alert=True)
+            return
+
+        async with db_conn() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM files WHERE is_deleted=0 AND mystery_tier=? ORDER BY RANDOM() LIMIT 1", (tier,)
+            )
+            f = await cur.fetchone()
+
+        if not f:
+            await add_coins(user.id, price, "mystery_box_refund", f"No files available in {tier} tier — refunded")
+            await query.answer("😢 No files available in this box right now — refunded.", show_alert=True)
+            return
+
+        async with db_conn() as db:
+            await db.execute(
+                "INSERT INTO purchases (user_id, file_pk, price, timestamp) VALUES (?, ?, ?, ?)",
+                (user.id, f["file_pk"], price, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+
+    await query.answer("🎉 You won a file!")
+    icon = FILE_TYPE_ICON.get(f["file_kind"], "📄")
+    await query.edit_message_text(
+        f"🎉 <b>Mystery Box Opened!</b>\n\n{icon} <b>{html.escape(f['file_name'])}</b>\n📦 {fmt_size(f['file_size'])}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬇ Download Now", callback_data=f"file:dl:{f['file_pk']}", style="success")]]),
+    )
+
+
+
+async def handle_invite_friends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    user = update.effective_user
+    reward = await get_setting("referral_reward", "20")
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user.id,))
+        count = (await cur.fetchone())[0]
+    link = f"https://t.me/{BOT_USERNAME}?start={user.id}"
+    text = (
+        "🚀 <b>Invite Friends</b>\n\n"
+        f"Earn <b>{reward} Coins</b> for every friend who joins using your link!\n\n"
+        f"🔗 <code>{link}</code>\n\n"
+        f"👥 Total Referrals: <b>{count}</b>"
+    )
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👥 My Referrals", callback_data="myrefs:0", style="primary")]]),
+    )
+
+
+async def cb_my_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    per_page = 10
+    user = update.effective_user
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT new_user_id, date, reward FROM referrals WHERE referrer_id=? ORDER BY date DESC LIMIT ? OFFSET ?",
+            (user.id, per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
+
+    if not rows and page == 0:
+        text = "👥 <b>My Referrals</b>\n\nYou haven't referred anyone yet."
+    else:
+        lines = ["👥 <b>My Referrals</b>\n"]
+        for r in rows:
+            u = await get_user_row(r["new_user_id"])
+            label = f"@{u['username']}" if u and u["username"] else (u["first_name"] if u else f"User {r['new_user_id']}")
+            lines.append(f"• {html.escape(label or '—')} — 🪙 +{r['reward']} <i>({fmt_date(r['date'])})</i>")
+        text = "\n".join(lines)
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"myrefs:{page-1}", style="primary"))
+    if len(rows) == per_page:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"myrefs:{page+1}", style="primary"))
+    kb = InlineKeyboardMarkup([nav]) if nav else None
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def handle_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT referrer_id, COUNT(*) as cnt FROM referrals GROUP BY referrer_id "
+            "ORDER BY cnt DESC LIMIT 10"
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        await update.effective_message.reply_text("🏆 <b>Leaderboard</b>\n\nNo referrals yet.", parse_mode=ParseMode.HTML)
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 <b>Top 10 Referrals</b>\n"]
+    for i, r in enumerate(rows):
+        u = await get_user_row(r["referrer_id"])
+        name = html.escape(u["first_name"] or "Unknown") if u else "Unknown"
+        rank = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{rank} {name} — <b>{r['cnt']}</b> referrals")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+
+async def handle_redeem_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Redeem a Code", callback_data="redeem:enter", style="primary")],
+        [InlineKeyboardButton("🎁 Convert Coins to Gift Code", callback_data="redeem:gift", style="primary")],
+    ])
+    await update.effective_message.reply_text(
+        "🎟️ <b>Redeem Center</b>\n\nWhat would you like to do?",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+
+
+async def cb_redeem_enter_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "🎟️ Please enter your redeem code:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="redeem:cancel", style="primary")]]),
+    )
+    return RD_CODE
+
+
+async def cb_redeem_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+async def handle_redeem_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip().upper()
+    user = update.effective_user
+    lock = await get_user_action_lock(user.id)
+
+    async with lock:
+        async with db_conn() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM redeems WHERE code=?", (code,))
+            redeem = await cur.fetchone()
+
+            admin = await is_admin(user.id)
+            if not redeem:
+                await update.message.reply_text("❌ Invalid Redeem Code.", reply_markup=user_reply_keyboard(admin))
+                return ConversationHandler.END
+
+            if redeem["status"] != "active":
+                await update.message.reply_text("❌ This code is no longer active.", reply_markup=user_reply_keyboard(admin))
+                return ConversationHandler.END
+
+            if redeem["expiry_date"]:
+                try:
+                    if datetime.fromisoformat(redeem["expiry_date"]) < datetime.utcnow():
+                        await db.execute("UPDATE redeems SET status='expired' WHERE code=?", (code,))
+                        await db.commit()
+                        await update.message.reply_text("❌ This code has expired.", reply_markup=user_reply_keyboard(admin))
+                        return ConversationHandler.END
+                except ValueError:
+                    pass
+
+            if redeem["usage_limit"] and redeem["used_count"] >= redeem["usage_limit"]:
+                await update.message.reply_text("❌ This code has reached its usage limit.", reply_markup=user_reply_keyboard(admin))
+                return ConversationHandler.END
+
+            cur = await db.execute(
+                "SELECT 1 FROM redeem_uses WHERE code=? AND user_id=?", (code, user.id)
+            )
+            if await cur.fetchone():
+                await update.message.reply_text("❌ You have already redeemed this code.", reply_markup=user_reply_keyboard(admin))
+                return ConversationHandler.END
+
+            await db.execute(
+                "INSERT INTO redeem_uses (code, user_id, timestamp) VALUES (?, ?, ?)",
+                (code, user.id, datetime.utcnow().isoformat()),
+            )
+            await db.execute("UPDATE redeems SET used_count = used_count + 1 WHERE code=?", (code,))
+            await db.commit()
+
+        if redeem["coin_reward"]:
+            await add_coins(user.id, redeem["coin_reward"], "redeem", f"Redeem code {code}")
+        if redeem["premium_days"]:
+            await grant_premium(user.id, redeem["premium_days"], admin_id=0)
+
+    msg = f"✅ <b>Redeem Successful!</b>\n🪙 +{redeem['coin_reward']} Coins"
+    if redeem["premium_days"]:
+        msg += f"\n⭐ +{redeem['premium_days']} Days Premium"
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=user_reply_keyboard(admin))
+    return ConversationHandler.END
+
+
+
+def _generate_gift_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "GIFT" + "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+async def cb_redeem_gift_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    balance = await get_balance(update.effective_user.id)
+    await query.message.reply_text(
+        f"🎁 <b>Convert Coins to Gift Code</b>\n\n"
+        f"🪙 Your balance: <b>{balance}</b>\n\n"
+        "Enter how many coins to convert into a one-time gift code "
+        "(you can share it with anyone — they redeem it once for that many coins):",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="redeem:cancel", style="primary")]]),
+    )
+    return GC_AMOUNT
+
+
+async def conv_gift_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("❌ Please enter a valid positive number of coins.")
+        return GC_AMOUNT
+    amount = int(text)
+    user = update.effective_user
+    lock = await get_user_action_lock(user.id)
+
+    async with lock:
+        ok = await remove_coins(user.id, amount, "gift_code_created", f"Converted {amount} coins to a gift code")
+        if not ok:
+            await update.message.reply_text("❌ You don't have enough coins for that.")
+            return ConversationHandler.END
+
+        code = _generate_gift_code()
+        async with db_conn() as db:
+            for _ in range(5):
+                cur = await db.execute("SELECT 1 FROM redeems WHERE code=?", (code,))
+                if not await cur.fetchone():
+                    break
+                code = _generate_gift_code()
+            await db.execute(
+                "INSERT INTO redeems (code, coin_reward, premium_days, usage_limit, status, created_by, created_at, source) "
+                "VALUES (?, ?, 0, 1, 'active', ?, ?, 'user')",
+                (code, amount, user.id, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+
+    await update.message.reply_text(
+        f"✅ <b>Gift Code Created!</b>\n\n🎟 Code: <code>{code}</code>\n🪙 Value: <b>{amount} Coins</b>\n\n"
+        "Share this code with anyone — they can redeem it once via 🎟️ Redeem Code → Redeem a Code.",
+        parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
+
+
+
+async def handle_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    user = update.effective_user
+    row = await get_user_row(user.id)
+    balance = await get_balance(user.id)
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM purchases WHERE user_id=?", (user.id,))
+        purchased = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (user.id,))
+        refs = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT COUNT(*) FROM redeem_uses WHERE user_id=?", (user.id,))
+        redeems = (await cur.fetchone())[0]
+
+    is_premium = await is_premium_active(user.id)
+    premium_line = "👑 <b>Premium — Active</b>" if is_premium else "⭐ Premium: <i>Not Active</i>"
+    text = (
+        "📊 <b>My Stats</b>\n"
+        f"{DIVIDER}\n"
+        f"👤 <b>User ID:</b> <code>{user.id}</code>\n"
+        f"📅 <b>Join Date:</b> {fmt_date(row['join_date']) if row else '—'}\n"
+        f"🪙 <b>Coins:</b> {balance}\n"
+        f"📁 <b>Purchased Files:</b> {purchased}\n"
+        f"👥 <b>Referrals:</b> {refs}\n"
+        f"🎁 <b>Redeem Count:</b> {redeems}\n"
+        f"{premium_line}\n"
+        f"{DIVIDER}"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+
+async def handle_buy_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard_user(update, context):
+        return
+    await send_file_list(update, context, page=0)
+
+
+async def send_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int, edit: bool = False) -> None:
+    per_page = 8
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT file_pk, file_name, price FROM files WHERE is_deleted=0 "
+            "ORDER BY file_pk DESC LIMIT ? OFFSET ?",
+            (per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        text = "📁 <b>Buy Files</b>\n\nNo files available right now."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📁 My Purchases", callback_data="purchases:0", style="primary")]])
+    else:
+        text = "📁 <b>Buy Files</b>\n\nSelect a file to view details:"
+        buttons = []
+        for r in rows:
+            tag = "🟢 FREE" if r["price"] == 0 else f"🪙 {r['price']}"
+            buttons.append([InlineKeyboardButton(f"📄 {r['file_name']} — {tag}", callback_data=f"file:view:{r['file_pk']}", style="primary")])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"files:list:{page-1}", style="primary"))
+        if len(rows) == per_page:
+            nav.append(InlineKeyboardButton("Next ➡", callback_data=f"files:list:{page+1}", style="primary"))
+        if nav:
+            buttons.append(nav)
+        buttons.append([InlineKeyboardButton("📁 My Purchases", callback_data="purchases:0", style="primary")])
+        kb = InlineKeyboardMarkup(buttons)
+
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_files_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    await send_file_list(update, context, page, edit=True)
+
+
+async def cb_file_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    file_pk = int(query.data.split(":")[2])
+    user = update.effective_user
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM files WHERE file_pk=? AND is_deleted=0", (file_pk,))
+        f = await cur.fetchone()
+        if not f:
+            await query.answer("❌ File not found.", show_alert=True)
+            return
+        cur = await db.execute(
+            "SELECT 1 FROM purchases WHERE user_id=? AND file_pk=?", (user.id, file_pk)
+        )
+        owned = bool(await cur.fetchone())
+
+    await query.answer()
+    icon = FILE_TYPE_ICON.get(f["file_kind"], "📄")
+    text = (
+        f"{icon} <b>{html.escape(f['file_name'])}</b>\n\n"
+        f"📦 Size: <b>{fmt_size(f['file_size'])}</b>\n"
+        f"📄 Description: {html.escape(f['description']) if f['description'] else '—'}\n"
+    )
+    if f["price"] == 0 or owned:
+        text += "\n🟢 <b>FREE</b>" if f["price"] == 0 and not owned else "\n✅ <b>You own this file</b>"
+        buttons = [[InlineKeyboardButton("⬇ Download", callback_data=f"file:dl:{file_pk}", style="primary")]]
+    else:
+        text += f"\n🪙 <b>{f['price']} Coins</b>"
+        buttons = [[InlineKeyboardButton("🛒 Buy Now", callback_data=f"file:buy:{file_pk}", style="primary")]]
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="files:list:0", style="primary")])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_file_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    file_pk = int(query.data.split(":")[2])
+    user = update.effective_user
+    lock = await get_user_action_lock(user.id)
+    async with lock:
+        async with db_conn() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM files WHERE file_pk=? AND is_deleted=0", (file_pk,))
+            f = await cur.fetchone()
+            if not f:
+                await query.answer("❌ File not found.", show_alert=True)
+                return
+            cur = await db.execute("SELECT 1 FROM purchases WHERE user_id=? AND file_pk=?", (user.id, file_pk))
+            if await cur.fetchone():
+                await query.answer("✅ You already own this file.", show_alert=True)
+                return
+
+        if f["price"] > 0:
+            ok = await remove_coins(user.id, f["price"], "purchase", f"Purchased file: {f['file_name']}")
+            if not ok:
+                await query.answer("❌ Not enough Coins.", show_alert=True)
+                await query.edit_message_text(
+                    "❌ <b>Not enough Coins.</b>\n\nPlease top up your wallet to continue.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Open Wallet", callback_data="wallet:home", style="primary")]]),
+                )
+                return
+
+        async with db_conn() as db:
+            await db.execute(
+                "INSERT INTO purchases (user_id, file_pk, price, timestamp) VALUES (?, ?, ?, ?)",
+                (user.id, file_pk, f["price"], datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+
+    await query.answer("✅ Purchased!")
+    await query.edit_message_text(
+        f"✅ <b>Purchase Successful!</b>\n\nYou now own <b>{html.escape(f['file_name'])}</b> forever.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬇ Download Now", callback_data=f"file:dl:{file_pk}", style="primary")]]),
+    )
+
+
+async def cb_file_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    file_pk = int(query.data.split(":")[2])
+    user = update.effective_user
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM files WHERE file_pk=? AND is_deleted=0", (file_pk,))
+        f = await cur.fetchone()
+        if not f:
+            await query.answer("❌ File not found.", show_alert=True)
+            return
+        if f["price"] > 0:
+            cur = await db.execute("SELECT 1 FROM purchases WHERE user_id=? AND file_pk=?", (user.id, file_pk))
+            if not await cur.fetchone():
+                await query.answer("❌ You need to purchase this file first.", show_alert=True)
+                return
+
+    await query.answer("⬇ Sending file...")
+    try:
+        await context.bot.send_document(
+            chat_id=user.id, document=f["tg_file_id"], caption=f"📄 {html.escape(f['file_name'])}", parse_mode=ParseMode.HTML
+        )
+    except (BadRequest, TelegramError):
+        try:
+            await context.bot.send_message(user.id, "⚠️ Could not deliver file, please contact support.")
+        except TelegramError:
+            pass
+        return
+
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO downloads (user_id, file_pk, timestamp) VALUES (?, ?, ?)",
+            (user.id, file_pk, datetime.utcnow().isoformat()),
+        )
+        await db.execute("UPDATE files SET downloads_count = downloads_count + 1 WHERE file_pk=?", (file_pk,))
+        await db.commit()
+
+
+async def cb_my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    per_page = 8
+    user = update.effective_user
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT p.*, f.file_name FROM purchases p JOIN files f ON p.file_pk=f.file_pk "
+            "WHERE p.user_id=? ORDER BY p.id DESC LIMIT ? OFFSET ?",
+            (user.id, per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        text = "📁 <b>My Purchases</b>\n\nYou haven't purchased any files yet."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="files:list:0", style="primary")]])
+    else:
+        text = "📁 <b>My Purchases</b>\n\n"
+        buttons = []
+        for r in rows:
+            buttons.append([InlineKeyboardButton(f"⬇ {r['file_name']}", callback_data=f"file:dl:{r['file_pk']}", style="primary")])
+        buttons.append([InlineKeyboardButton("⬅ Back", callback_data="files:list:0", style="primary")])
+        kb = InlineKeyboardMarkup(buttons)
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+
+async def cb_admin_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await update.effective_message.reply_text(
+        "📤 <b>Upload File</b>\n\nSend me the file you want to add to the store.",
+        parse_mode=ParseMode.HTML,
+    )
+    return UP_FILE
+
+
+async def conv_upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    kind = None
+    tg_file = None
+    file_name = None
+    file_size = 0
+
+    if msg.document:
+        kind, tg_file = "document", msg.document
+        file_name, file_size = tg_file.file_name or "file", tg_file.file_size or 0
+    elif msg.video:
+        kind, tg_file = "video", msg.video
+        file_name = tg_file.file_name or f"video_{tg_file.file_unique_id}.mp4"
+        file_size = tg_file.file_size or 0
+    elif msg.audio:
+        kind, tg_file = "audio", msg.audio
+        file_name = tg_file.file_name or f"audio_{tg_file.file_unique_id}.mp3"
+        file_size = tg_file.file_size or 0
+    elif msg.photo:
+        tg_file = msg.photo[-1]
+        kind = "photo"
+        file_name = f"photo_{tg_file.file_unique_id}.jpg"
+        file_size = tg_file.file_size or 0
+    elif msg.voice:
+        kind, tg_file = "voice", msg.voice
+        file_name = f"voice_{tg_file.file_unique_id}.ogg"
+        file_size = tg_file.file_size or 0
+    elif msg.animation:
+        kind, tg_file = "animation", msg.animation
+        file_name = tg_file.file_name or f"gif_{tg_file.file_unique_id}.mp4"
+        file_size = tg_file.file_size or 0
+    else:
+        await msg.reply_text("❌ Unsupported file type. Please send a valid file.")
+        return UP_FILE
+
+    context.user_data["up_kind"] = kind
+    context.user_data["up_file_id"] = tg_file.file_id
+    context.user_data["up_unique_id"] = tg_file.file_unique_id
+    context.user_data["up_orig_name"] = file_name
+    context.user_data["up_size"] = file_size
+
+    await msg.reply_text(
+        f"✅ File received ({fmt_size(file_size)}).\n\n📝 Enter File Name (or send - to use original filename):"
+    )
+    return UP_NAME
+
+
+async def conv_upload_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    name = context.user_data["up_orig_name"] if text == "-" else text
+    context.user_data["up_name"] = name
+    await update.message.reply_text("📄 Enter Description (or send - to skip):")
+    return UP_DESC
+
+
+async def conv_upload_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    context.user_data["up_desc"] = "" if text == "-" else text
+    await update.message.reply_text("💰 Enter Coin Price (0 = FREE):\n\nExample: 0, 50, 100, 250, 500, 1000")
+    return UP_PRICE
+
+
+async def conv_upload_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Please enter a valid number.")
+        return UP_PRICE
+    context.user_data["up_price"] = int(text)
+    return await show_upload_preview(update, context)
+
+
+async def show_upload_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    d = context.user_data
+    text = (
+        "👀 <b>Preview</b>\n\n"
+        f"📁 File Name: {html.escape(d['up_name'])}\n"
+        f"📦 File Size: {fmt_size(d['up_size'])}\n"
+        f"📄 Description: {html.escape(d['up_desc']) if d['up_desc'] else '—'}\n"
+        f"💰 Coin Price: {d['up_price']}\n"
+        f"📅 Upload Date: {fmt_date(datetime.utcnow().isoformat())}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Publish", callback_data="up:publish", style="primary"),
+         InlineKeyboardButton("✏ Edit", callback_data="up:edit", style="primary")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="up:cancel", style="primary")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return UP_PREVIEW
+
+
+async def cb_upload_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    d = context.user_data
+    user = update.effective_user
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO files (tg_file_id, tg_file_unique_id, file_kind, file_name, file_size, "
+            "description, price, upload_date, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (d["up_file_id"], d["up_unique_id"], d["up_kind"], d["up_name"], d["up_size"],
+             d["up_desc"], d["up_price"], datetime.utcnow().isoformat(), user.id),
+        )
+        await db.commit()
+    await query.edit_message_text("✅ <b>File Published Successfully!</b>", parse_mode=ParseMode.HTML)
+    for key in ["up_kind", "up_file_id", "up_unique_id", "up_orig_name", "up_size", "up_name", "up_desc", "up_price"]:
+        context.user_data.pop(key, None)
+    return ConversationHandler.END
+
+
+async def cb_upload_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("📝 Enter File Name (or send - to use original filename):")
+    return UP_NAME
+
+
+async def cb_upload_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Upload cancelled.")
+    for key in ["up_kind", "up_file_id", "up_unique_id", "up_orig_name", "up_size", "up_name", "up_desc", "up_price"]:
+        context.user_data.pop(key, None)
+    return ConversationHandler.END
+
+
+
+async def cb_admin_managefiles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+    await send_manage_files_list(update, context, page=0)
+
+
+async def send_manage_files_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
+    viewer_id = update.effective_user.id
+    is_owner = viewer_id == OWNER_ID
+    per_page = 8
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        if is_owner:
+            cur = await db.execute(
+                "SELECT file_pk, file_name, price, downloads_count FROM files WHERE is_deleted=0 "
+                "ORDER BY file_pk DESC LIMIT ? OFFSET ?",
+                (per_page, page * per_page),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT file_pk, file_name, price, downloads_count FROM files WHERE is_deleted=0 AND uploaded_by=? "
+                "ORDER BY file_pk DESC LIMIT ? OFFSET ?",
+                (viewer_id, per_page, page * per_page),
+            )
+        rows = await cur.fetchall()
+
+    text = "📂 <b>Manage Files</b>\n\n"
+    text += "Select a file to edit or delete:" if is_owner else "Files you've uploaded — select one to edit or delete:"
+    buttons = []
+    for r in rows:
+        buttons.append([InlineKeyboardButton(
+            f"📄 {r['file_name']} ({r['downloads_count']}⬇)", callback_data=f"mf:view:{r['file_pk']}:{page}"
+        , style="primary")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"mf:list:{page-1}", style="primary"))
+    if len(rows) == per_page:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"mf:list:{page+1}", style="primary"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("🔍 Search Files", callback_data="mf:searchstart", style="primary")])
+    buttons.append([InlineKeyboardButton("⬅ Back to Admin Panel", callback_data="ad:home", style="primary")])
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_mf_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    await send_manage_files_list(update, context, page)
+
+
+async def cb_mf_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("🔍 Enter a keyword to search your files by name:")
+    return MF_SEARCH
+
+
+async def conv_mf_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    keyword = update.message.text.strip()
+    viewer_id = update.effective_user.id
+    is_owner = viewer_id == OWNER_ID
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        if is_owner:
+            cur = await db.execute(
+                "SELECT file_pk, file_name FROM files WHERE is_deleted=0 AND file_name LIKE ? LIMIT 15",
+                (f"%{keyword}%",),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT file_pk, file_name FROM files WHERE is_deleted=0 AND uploaded_by=? AND file_name LIKE ? LIMIT 15",
+                (viewer_id, f"%{keyword}%"),
+            )
+        rows = await cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("❌ No files matched that keyword.")
+        return ConversationHandler.END
+
+    buttons = [[InlineKeyboardButton(f"📄 {r['file_name']}", callback_data=f"mf:view:{r['file_pk']}:0", style="primary")] for r in rows]
+    await update.message.reply_text(
+        f"🔍 Found <b>{len(rows)}</b> matching file(s):", parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return ConversationHandler.END
+
+
+async def cb_mf_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _, _, file_pk, page = query.data.split(":")
+    await _render_mf_view(update, int(file_pk), int(page))
+
+
+async def _render_mf_view(update: Update, file_pk: int, page: int) -> None:
+    query = update.callback_query
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM files WHERE file_pk=?", (file_pk,))
+        f = await cur.fetchone()
+    if not f:
+        await query.edit_message_text("❌ File not found.")
+        return
+    if update.effective_user.id != OWNER_ID and f["uploaded_by"] != update.effective_user.id:
+        await query.edit_message_text("🚫 You can only manage files you uploaded.")
+        return
+    text = (
+        f"📄 <b>{html.escape(f['file_name'])}</b>\n\n"
+        f"📦 Size: {fmt_size(f['file_size'])}\n"
+        f"📄 Description: {html.escape(f['description']) if f['description'] else '—'}\n"
+        f"💰 Price: {f['price']} coins\n"
+        f"⬇ Downloads: {f['downloads_count']}\n"
+        f"🎁 Mystery Tier: {f['mystery_tier'] or 'None'}\n"
+        f"📌 Featured: {'Yes' if f['featured'] else 'No'}\n"
+        f"📅 Uploaded: {fmt_date(f['upload_date'])}"
+    )
+    feature_label = "📌 Unfeature" if f["featured"] else "📌 Make Featured"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Edit Name", callback_data=f"mf:ename:{file_pk}", style="primary"),
+         InlineKeyboardButton("✏️ Edit Desc", callback_data=f"mf:edesc:{file_pk}", style="primary")],
+        [InlineKeyboardButton("✏️ Edit Price", callback_data=f"mf:eprice:{file_pk}", style="primary"),
+         InlineKeyboardButton("🎁 Set Mystery Tier", callback_data=f"mf:etier:{file_pk}", style="primary")],
+        [InlineKeyboardButton(feature_label, callback_data=f"mf:tfeat:{file_pk}:{page}", style="primary")],
+        [InlineKeyboardButton("🗑 Delete File", callback_data=f"mf:delete:{file_pk}", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"mf:list:{page}", style="primary")],
+    ])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_mf_toggle_featured(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, _, file_pk, page = query.data.split(":")
+    file_pk = int(file_pk)
+    if not await _can_manage_file(update.effective_user.id, file_pk):
+        await query.answer("🚫 You can only manage files you uploaded.", show_alert=True)
+        return
+    async with db_conn() as db:
+        cur = await db.execute("SELECT featured FROM files WHERE file_pk=?", (file_pk,))
+        row = await cur.fetchone()
+        new_val = 0 if (row and row[0]) else 1
+        await db.execute("UPDATE files SET featured=? WHERE file_pk=?", (new_val, file_pk))
+        await db.commit()
+    await query.answer("📌 Featured!" if new_val else "Unfeatured")
+    await _render_mf_view(update, file_pk, int(page))
+
+
+async def _can_manage_file(user_id: int, file_pk: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
+    async with db_conn() as db:
+        cur = await db.execute("SELECT uploaded_by FROM files WHERE file_pk=?", (file_pk,))
+        row = await cur.fetchone()
+        return bool(row and row[0] == user_id)
+
+
+async def cb_mf_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    _, field, file_pk = query.data.split(":")
+    file_pk = int(file_pk)
+    if not await _can_manage_file(update.effective_user.id, file_pk):
+        await query.answer("🚫 You can only manage files you uploaded.", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    context.user_data["ef_file_pk"] = file_pk
+    context.user_data["ef_field"] = field
+    prompts = {
+        "ename": "📝 Enter new File Name:",
+        "edesc": "📄 Enter new Description:",
+        "eprice": "💰 Enter new Coin Price:",
+        "etier": "🎁 Enter Mystery Tier — <code>random</code>, <code>rare</code>, <code>premium</code>, or <code>none</code>:",
+    }
+    await query.message.reply_text(prompts[field], parse_mode=ParseMode.HTML)
+    return EF_FIELD
+
+
+async def conv_edit_field_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    field = context.user_data.pop("ef_field")
+    file_pk = context.user_data.pop("ef_file_pk")
+    value = update.message.text.strip()
+
+    column_map = {"ename": "file_name", "edesc": "description", "eprice": "price", "etier": "mystery_tier"}
+    column = column_map[field]
+
+    if field == "eprice":
+        if not value.isdigit():
+            await update.message.reply_text("❌ Please enter a valid number.")
+            context.user_data["ef_field"] = field
+            context.user_data["ef_file_pk"] = file_pk
+            return EF_FIELD
+        value = int(value)
+    elif field == "etier":
+        value = value.lower()
+        if value not in ("random", "rare", "premium", "none"):
+            await update.message.reply_text("❌ Must be one of: random, rare, premium, none.")
+            context.user_data["ef_field"] = field
+            context.user_data["ef_file_pk"] = file_pk
+            return EF_FIELD
+        value = None if value == "none" else value
+
+    async with db_conn() as db:
+        await db.execute(f"UPDATE files SET {column}=? WHERE file_pk=?", (value, file_pk))
+        await db.commit()
+
+    await update.message.reply_text("✅ File updated successfully.")
+    return ConversationHandler.END
+
+
+async def cb_mf_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    file_pk = int(query.data.split(":")[2])
+    if not await _can_manage_file(update.effective_user.id, file_pk):
+        await query.answer("🚫 You can only manage files you uploaded.", show_alert=True)
+        return
+    await query.answer()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"mf:delconfirm:{file_pk}", style="primary"),
+         InlineKeyboardButton("❌ No", callback_data=f"mf:view:{file_pk}:0", style="primary")],
+    ])
+    await query.edit_message_text("⚠️ Are you sure you want to delete this file?", reply_markup=kb)
+
+
+async def cb_mf_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    file_pk = int(query.data.split(":")[2])
+    if not await _can_manage_file(update.effective_user.id, file_pk):
+        await query.answer("🚫 You can only manage files you uploaded.", show_alert=True)
+        return
+    async with db_conn() as db:
+        await db.execute("UPDATE files SET is_deleted=1 WHERE file_pk=?", (file_pk,))
+        await db.commit()
+    await query.answer("🗑 Deleted")
+    await query.edit_message_text("🗑 <b>File deleted successfully.</b>", parse_mode=ParseMode.HTML)
+
+
+
+async def cb_admin_fcmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_owner(update):
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Channel", callback_data="fc:add", style="primary"),
+         InlineKeyboardButton("➖ Remove Channel", callback_data="fc:remove", style="primary")],
+        [InlineKeyboardButton("📋 Channel List", callback_data="fc:list", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")],
+    ])
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("📡 <b>Force Channel Manager</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text("📡 <b>Force Channel Manager</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_fc_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await require_owner(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "➕ <b>Add Force-Join Channel/Group</b>\n\n"
+        "Send either:\n"
+        "• A public <b>@username</b>\n"
+        "• Or a <b>https://t.me/username</b> link\n\n"
+        "I need to already be a <b>member</b> of it — admin rights aren't required.",
+        parse_mode=ParseMode.HTML,
+    )
+    return FC_ADD
+
+
+async def conv_fc_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    try:
+        text = (msg.text or "").strip()
+        username = None
+
+        if text.startswith("@") and re.match(r"^@[A-Za-z0-9_]{5,32}$", text):
+            username = text
+        else:
+            m = re.match(r"^https?://t\.me/([A-Za-z0-9_]{5,32})/?$", text)
+            if m:
+                username = f"@{m.group(1)}"
+
+        if not username:
+            await msg.reply_text("❌ Please send a valid @username or a https://t.me/username link.")
+            return FC_ADD
+
+        try:
+            chat = await context.bot.get_chat(username)
+        except TelegramError as e:
+            await msg.reply_text(
+                f"❌ Couldn't find that channel/group ({html.escape(str(e))}).\n"
+                "Make sure the username is correct and I've already been added to it.",
+                parse_mode=ParseMode.HTML,
+            )
+            return FC_ADD
+
+        try:
+            me = await context.bot.get_me()
+            member = await context.bot.get_chat_member(chat.id, me.id)
+            if member.status in ("left", "kicked"):
+                await msg.reply_text("❌ I'm not currently a member of that chat. Please add me first, then try again.")
+                return FC_ADD
+        except TelegramError as e:
+            await msg.reply_text(
+                f"❌ I can't access that chat's member list ({html.escape(str(e))}).\n"
+                "Please make sure I've been added to it.",
+                parse_mode=ParseMode.HTML,
+            )
+            return FC_ADD
+
+        resolved_username = f"@{chat.username}" if chat.username else username
+        await _save_force_channel(chat.id, resolved_username, chat.title, str(chat.type))
+        await msg.reply_text(f"✅ Added: <b>{html.escape(chat.title)}</b>", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    except Exception as e:
+        log.exception("Unexpected error in conv_fc_add")
+        await msg.reply_text(
+            f"⚠️ <b>Something went wrong adding this channel.</b>\n<code>{html.escape(str(e))}</code>\n\n"
+            "This has been logged — please share this exact message so it can be fixed.",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+
+
+async def _save_force_channel(chat_id: int, username: str, title: str, chat_type: str) -> None:
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO force_channels (username, chat_id, title, chat_type, added_date) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET "
+            "chat_id=excluded.chat_id, title=excluded.title, chat_type=excluded.chat_type",
+            (username, chat_id, title, chat_type, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+
+
+async def cb_fc_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    channels = await list_force_channels()
+    if not channels:
+        text = "📋 <b>Channel List</b>\n\nNo channels added yet."
+    else:
+        lines = ["📋 <b>Channel List</b>\n"]
+        for ch in channels:
+            lines.append(f"• <b>{html.escape(ch['title'])}</b> — added {fmt_date(ch['added_date'])}")
+        text = "\n".join(lines)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button("ad:fcmgr"))
+
+
+async def cb_fc_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    channels = await list_force_channels()
+    if not channels:
+        await query.edit_message_text("No channels to remove.", reply_markup=back_button("ad:fcmgr"))
+        return
+    buttons = [[InlineKeyboardButton(f"➖ {ch['title']}", callback_data=f"fc:rm:{ch['id']}", style="primary")] for ch in channels]
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:fcmgr", style="primary")])
+    await query.edit_message_text("➖ Select a channel to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_fc_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    ch_id = int(query.data.split(":")[2])
+    async with db_conn() as db:
+        await db.execute("DELETE FROM force_channels WHERE id=?", (ch_id,))
+        await db.commit()
+    await query.answer("➖ Removed")
+    await cb_fc_remove_menu(update, context)
+
+
+
+async def cb_admin_walletmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    is_owner = update.effective_user.id == OWNER_ID
+    rows = [
+        [InlineKeyboardButton("➕ Add Coins", callback_data="wm:add", style="primary"),
+         InlineKeyboardButton("➖ Remove Coins", callback_data="wm:remove", style="primary")],
+        [InlineKeyboardButton("♻ Reset Coins", callback_data="wm:reset", style="primary")],
+    ]
+    if is_owner:
+        rows.append([InlineKeyboardButton("🎯 Set Exact Balance", callback_data="wm:setbal", style="primary")])
+        rows.append([InlineKeyboardButton("👥 Bulk Manage Users", callback_data="wm:bulk", style="primary")])
+        rows.append([InlineKeyboardButton("📋 Pending Payments", callback_data="pp:list:0", style="primary")])
+    rows.append([InlineKeyboardButton("📜 Wallet History", callback_data="wm:history", style="primary")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")])
+    kb = InlineKeyboardMarkup(rows)
+    text = "💰 <b>Wallet Manager</b>\n\nEnter a User ID to manage their wallet, or view recent history."
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_wm_action_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    action = query.data.split(":")[1]
+    if action == "setbal" and not await require_owner(update):
+        return ConversationHandler.END
+    await query.answer()
+    context.user_data["wm_action"] = action
+    await query.message.reply_text("👤 Enter the target User ID:")
+    return UM_SEARCH
+
+
+async def conv_wm_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Please send a valid numeric User ID.")
+        return UM_SEARCH
+    target_id = int(text)
+    row = await get_user_row(target_id)
+    if not row:
+        await update.message.reply_text("❌ User not found.")
+        return ConversationHandler.END
+    context.user_data["wm_target"] = target_id
+    action = context.user_data["wm_action"]
+    if action == "reset":
+        async with db_conn() as db:
+            await db.execute("UPDATE wallet SET coins=0 WHERE user_id=?", (target_id,))
+            await db.execute(
+                "INSERT INTO transactions (user_id, tx_type, amount, description, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (target_id, "admin_reset", 0, "Admin reset wallet to 0", datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+        await update.message.reply_text(f"♻ Wallet reset to 0 for user {target_id}.")
+        await log_admin_action(context.bot, update.effective_user.id, f"♻ Reset wallet to 0 for user {target_id}")
+        return ConversationHandler.END
+
+    if action == "setbal":
+        await update.message.reply_text("🎯 Enter the exact balance to set:")
+        return UM_AMOUNT
+
+    await update.message.reply_text("🪙 Enter the amount:")
+    return UM_AMOUNT
+
+
+async def conv_wm_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    action = context.user_data.get("wm_action")
+    min_ok = 0 if action == "setbal" else 1
+    if not text.isdigit() or int(text) < min_ok:
+        await update.message.reply_text("❌ Please enter a valid number." if action == "setbal" else "❌ Please enter a valid positive number.")
+        return UM_AMOUNT
+    amount = int(text)
+    target_id = context.user_data.pop("wm_target")
+    action = context.user_data.pop("wm_action")
+
+    if action == "setbal":
+        async with db_conn() as db:
+            await db.execute(
+                "INSERT INTO wallet (user_id, coins) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET coins=excluded.coins",
+                (target_id, amount),
+            )
+            await db.execute(
+                "INSERT INTO transactions (user_id, tx_type, amount, description, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (target_id, "admin_setbal", amount, f"Admin set exact balance to {amount}", datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+        await update.message.reply_text(f"🎯 Balance for user {target_id} set to {amount} coins.")
+        await log_admin_action(context.bot, update.effective_user.id, f"🎯 Set exact balance for user {target_id} to {amount} coins")
+        return ConversationHandler.END
+
+    if action == "add":
+        new_bal = await add_coins(target_id, amount, "admin_gift", f"Admin added {amount} coins")
+        await update.message.reply_text(f"✅ Added {amount} coins. New balance: {new_bal}")
+        await log_admin_action(context.bot, update.effective_user.id, f"➕ Added {amount} coins to user {target_id}")
+        try:
+            await context.bot.send_message(target_id, f"🎁 <b>{amount} Coins</b> have been added to your wallet by admin!", parse_mode=ParseMode.HTML)
+        except TelegramError:
+            pass
+    else:
+        ok = await remove_coins(target_id, amount, "admin_deduct", f"Admin removed {amount} coins")
+        if ok:
+            await update.message.reply_text(f"✅ Removed {amount} coins.")
+            await log_admin_action(context.bot, update.effective_user.id, f"➖ Removed {amount} coins from user {target_id}")
+        else:
+            await update.message.reply_text("❌ User doesn't have enough coins to remove that amount.")
+    return ConversationHandler.END
+
+
+async def cb_wm_bulk_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await require_owner(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "👥 <b>Bulk Manage Users</b>\n\n"
+        "Send the target users separated by space, comma, or a new line — "
+        "numeric User IDs, @usernames, or a mix of both:\n"
+        "<code>111 222 @alice @bob</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    return WB_IDS
+
+
+async def conv_wm_bulk_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = update.message.text.strip()
+    tokens = [tok for tok in re.split(r"[\s,]+", raw) if tok]
+    if not tokens:
+        await update.message.reply_text("❌ Please send at least one User ID or @username.")
+        return WB_IDS
+
+    resolved: list[int] = []
+    not_found: list[str] = []
+
+    async with db_conn() as db:
+        for tok in tokens:
+            if tok.startswith("@"):
+                uname = tok.lstrip("@")
+                cur = await db.execute("SELECT user_id FROM users WHERE username=?", (uname,))
+                row = await cur.fetchone()
+                if row:
+                    resolved.append(row[0])
+                else:
+                    not_found.append(tok)
+            elif tok.isdigit():
+                resolved.append(int(tok))
+            else:
+                not_found.append(tok)
+
+    if not resolved:
+        await update.message.reply_text(
+            "❌ None of those could be resolved to a real user. Check the IDs/usernames and try again."
+        )
+        return WB_IDS
+
+    context.user_data["wb_ids"] = resolved
+    msg = f"✅ Resolved <b>{len(resolved)}</b> users.\n\nWhat should be applied to all of them?"
+    if not_found:
+        msg += f"\n\n⚠️ Not found (skipped): {', '.join(not_found[:15])}"
+        if len(not_found) > 15:
+            msg += f" (+{len(not_found) - 15} more)"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Coins", callback_data="wb:add", style="primary"),
+         InlineKeyboardButton("➖ Remove Coins", callback_data="wb:remove", style="primary")],
+        [InlineKeyboardButton("🚫 Ban All", callback_data="wb:ban", style="primary"),
+         InlineKeyboardButton("✅ Unban All", callback_data="wb:unban", style="primary")],
+        [InlineKeyboardButton("👑 Give Premium", callback_data="wb:premium", style="primary")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="wb:cancel", style="primary")],
+    ])
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return WB_ACTION
+
+
+async def cb_wb_action_coins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["wb_coin_action"] = "add" if query.data == "wb:add" else "remove"
+    verb = "add to" if query.data == "wb:add" else "remove from"
+    await query.message.reply_text(f"🪙 Enter the coin amount to {verb} all {len(context.user_data['wb_ids'])} users:")
+    return WB_AMOUNT
+
+
+async def conv_wm_bulk_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("❌ Please enter a valid positive number.")
+        return WB_AMOUNT
+    amount = int(text)
+    target_ids = context.user_data.pop("wb_ids")
+    action = context.user_data.pop("wb_coin_action")
+    is_add = action == "add"
+
+    verb = "Adding" if is_add else "Removing"
+    status_msg = await update.message.reply_text(f"⏳ {verb} {amount} coins for {len(target_ids)} users...")
+    ok_list: list[int] = []
+    skipped: list[int] = []
+
+    async def process_one(uid: int) -> None:
+        row = await get_user_row(uid)
+        if not row:
+            skipped.append(uid)
+            return
+        if is_add:
+            await add_coins(uid, amount, "admin_gift", f"Bulk admin gift: {amount} coins")
+            success = True
+        else:
+            success = await remove_coins(uid, amount, "admin_deduct", f"Bulk admin deduct: {amount} coins")
+        if not success:
+            skipped.append(uid)
+            return
+        ok_list.append(uid)
+        await TELEGRAM_SEND_LIMITER.acquire()
+        try:
+            verb_msg = f"🎁 <b>{amount} Coins</b> have been added to your wallet by admin!" if is_add \
+                else f"⚠️ <b>{amount} Coins</b> have been deducted from your wallet by admin."
+            await context.bot.send_message(uid, verb_msg, parse_mode=ParseMode.HTML)
+        except TelegramError:
+            pass
+
+    await asyncio.gather(*(process_one(uid) for uid in target_ids))
+
+    past_verb = "Added" if is_add else "Removed"
+    result = f"✅ <b>Bulk {past_verb} Complete</b>\n\n🪙 {past_verb} {amount} coins for <b>{len(ok_list)}</b> users."
+    if skipped:
+        result += f"\n⚠️ Skipped (not found or insufficient balance): {', '.join(str(u) for u in skipped[:20])}"
+        if len(skipped) > 20:
+            result += f" (+{len(skipped) - 20} more)"
+    await status_msg.edit_text(result, parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def cb_wb_action_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    target_ids = context.user_data.pop("wb_ids")
+    banned = 1 if query.data == "wb:ban" else 0
+    async with db_conn() as db:
+        for uid in target_ids:
+            await db.execute("UPDATE users SET is_banned=? WHERE user_id=?", (banned, uid))
+        await db.commit()
+    action_word = "Banned" if banned else "Unbanned"
+    await query.message.reply_text(f"✅ <b>{action_word}</b> {len(target_ids)} users.", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def cb_wb_action_premium_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("7 Days", callback_data="wb:pset:7", style="primary"),
+         InlineKeyboardButton("30 Days", callback_data="wb:pset:30", style="primary")],
+        [InlineKeyboardButton("90 Days", callback_data="wb:pset:90", style="primary"),
+         InlineKeyboardButton("Lifetime", callback_data="wb:pset:0", style="primary")],
+    ])
+    await query.message.reply_text("👑 Select Premium duration to grant to all selected users:", reply_markup=kb)
+    return WB_PREMIUM
+
+
+async def cb_wb_action_premium_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    days = int(query.data.split(":")[2])
+    target_ids = context.user_data.pop("wb_ids")
+    for uid in target_ids:
+        await grant_premium(uid, None if days == 0 else days, update.effective_user.id)
+        await TELEGRAM_SEND_LIMITER.acquire()
+        try:
+            label = "Lifetime" if days == 0 else f"{days} days"
+            await context.bot.send_message(
+                uid, f"👑 <b>You've been granted Premium!</b>\nDuration: {label}", parse_mode=ParseMode.HTML
+            )
+        except TelegramError:
+            pass
+    label = "Lifetime" if days == 0 else f"{days} Days"
+    await query.message.reply_text(f"✅ Granted <b>{label}</b> Premium to {len(target_ids)} users.", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def cb_wb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("wb_ids", None)
+    context.user_data.pop("wb_coin_action", None)
+    await query.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+
+async def cb_pending_payments_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not await require_owner(update):
+        return
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    per_page = 10
+    async with db_conn() as db:
+        total = (await (await db.execute("SELECT COUNT(*) FROM payments WHERE status='pending'")).fetchone())[0]
+        cur = await db.execute(
+            "SELECT * FROM payments WHERE status='pending' ORDER BY payment_id ASC LIMIT ? OFFSET ?",
+            (per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
+
+    if not rows and page == 0:
+        text = "📋 <b>Pending Payments</b>\n\nNothing pending right now — all caught up! ✅"
+        buttons = [[InlineKeyboardButton("⬅ Back", callback_data="ad:walletmgr", style="primary")]]
+    else:
+        text = f"📋 <b>Pending Payments</b>  —  Total: <b>{total}</b>\n\nTap Accept/Reject on any request below:\n"
+        buttons = []
+        for r in rows:
+            urow = await get_user_row(r["user_id"])
+            uname = f"@{urow['username']}" if urow and urow["username"] else (urow["first_name"] if urow else f"ID {r['user_id']}")
+            text += f"\n👤 <b>{html.escape(uname or str(r['user_id']))}</b> — ⭐{r['stars']} → 🪙{r['coins']} <i>({fmt_date(r['timestamp'])})</i>"
+            buttons.append([
+                InlineKeyboardButton(f"✅ Accept #{r['payment_id']}", callback_data=f"pay:accept:{r['payment_id']}", style="primary"),
+                InlineKeyboardButton(f"❌ Reject #{r['payment_id']}", callback_data=f"pay:reject:{r['payment_id']}", style="primary"),
+            ])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"pp:list:{page-1}", style="primary"))
+        if (page + 1) * per_page < total:
+            nav.append(InlineKeyboardButton("Next ➡", callback_data=f"pp:list:{page+1}", style="primary"))
+        if nav:
+            buttons.append(nav)
+        buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:walletmgr", style="primary")])
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_wm_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM transactions ORDER BY tx_id DESC LIMIT 15")
+        rows = await cur.fetchall()
+    if not rows:
+        text = "📜 No transactions yet."
+    else:
+        lines = ["📜 <b>Recent Wallet History</b>\n"]
+        for r in rows:
+            lines.append(f"👤 <code>{r['user_id']}</code> {'+' if r['amount']>=0 else ''}{r['amount']} — {html.escape(r['tx_type'])}")
+        text = "\n".join(lines)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button("ad:walletmgr"))
+
+
+
+async def cb_admin_redeemmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    is_owner = update.effective_user.id == OWNER_ID
+    rows = [
+        [InlineKeyboardButton("➕ Create Code", callback_data="rm:create", style="primary")],
+        [InlineKeyboardButton("📋 List Codes", callback_data="rm:list", style="primary")],
+        [InlineKeyboardButton("🗑 Delete Code", callback_data="rm:delstart", style="primary")],
+    ]
+    if is_owner:
+        rows.append([InlineKeyboardButton("🗑 Delete ALL Codes", callback_data="rm:delall", style="primary")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")])
+    kb = InlineKeyboardMarkup(rows)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("🎟 <b>Redeem Manager</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text("🎟 <b>Redeem Manager</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_rm_create_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        async with db_conn() as db:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM redeems WHERE created_by=? AND created_at >= ?",
+                (user_id, today_start),
+            )
+            count_today = (await cur.fetchone())[0]
+        if count_today >= ADMIN_DAILY_REDEEM_LIMIT:
+            await query.answer(
+                f"🚫 Daily limit reached — admins can create up to {ADMIN_DAILY_REDEEM_LIMIT} redeem codes per day.",
+                show_alert=True,
+            )
+            return ConversationHandler.END
+    await query.answer()
+    await query.message.reply_text("🎟 Enter the redeem code (e.g. WELCOME500):")
+    return RM_CODE
+
+
+async def conv_rm_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip().upper()
+    if not re.match(r"^[A-Z0-9_\-]{3,32}$", code):
+        await update.message.reply_text("❌ Invalid code format. Use letters/numbers only (3-32 chars).")
+        return RM_CODE
+    async with db_conn() as db:
+        cur = await db.execute("SELECT 1 FROM redeems WHERE code=?", (code,))
+        if await cur.fetchone():
+            await update.message.reply_text("❌ This code already exists. Try another.")
+            return RM_CODE
+    context.user_data["rm_code"] = code
+    await update.message.reply_text("💰 Enter Coin Reward (e.g. 500):")
+    return RM_COINS
+
+
+async def conv_rm_coins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Please enter a valid number.")
+        return RM_COINS
+    amount = int(text)
+    if update.effective_user.id != OWNER_ID:
+        if amount > ADMIN_MAX_REDEEM_COINS or amount < ADMIN_MIN_REDEEM_COINS:
+            await update.message.reply_text(
+                f"🚫 Admins can only create codes worth between {ADMIN_MIN_REDEEM_COINS}–{ADMIN_MAX_REDEEM_COINS} coins."
+            )
+            return RM_COINS
+    context.user_data["rm_coins"] = amount
+    await update.message.reply_text("⭐ Enter Premium Reward in days (0 for none):")
+    return RM_PREMIUM
+
+
+async def conv_rm_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Please enter a valid number.")
+        return RM_PREMIUM
+    context.user_data["rm_premium"] = int(text)
+    await update.message.reply_text("🔢 Enter Usage Limit (0 for unlimited):")
+    return RM_LIMIT
+
+
+async def conv_rm_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Please enter a valid number.")
+        return RM_LIMIT
+    context.user_data["rm_limit"] = int(text)
+    await update.message.reply_text("📅 Enter Expiry Date (DD-MM-YYYY) or send - for no expiry:")
+    return RM_EXPIRY
+
+
+async def conv_rm_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    expiry_iso = None
+    if text != "-":
+        try:
+            expiry_iso = datetime.strptime(text, "%d-%m-%Y").isoformat()
+        except ValueError:
+            await update.message.reply_text("❌ Invalid date format. Use DD-MM-YYYY or send -.")
+            return RM_EXPIRY
+
+    d = context.user_data
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO redeems (code, coin_reward, premium_days, usage_limit, expiry_date, status, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+            (d["rm_code"], d["rm_coins"], d["rm_premium"], d["rm_limit"], expiry_iso,
+             update.effective_user.id, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+
+    await update.message.reply_text(
+        f"✅ <b>Redeem Code Created!</b>\n\n🎟 Code: <code>{d['rm_code']}</code>\n💰 Coins: {d['rm_coins']}\n"
+        f"⭐ Premium Days: {d['rm_premium']}\n🔢 Usage Limit: {d['rm_limit'] or 'Unlimited'}\n"
+        f"📅 Expiry: {text if text != '-' else 'Never'}",
+        parse_mode=ParseMode.HTML,
+    )
+    await log_admin_action(
+        context.bot, update.effective_user.id,
+        f"🎟 Created redeem code <code>{d['rm_code']}</code> — {d['rm_coins']} coins"
+    )
+    for k in ["rm_code", "rm_coins", "rm_premium", "rm_limit"]:
+        context.user_data.pop(k, None)
+    return ConversationHandler.END
+
+
+async def cb_rm_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM redeems ORDER BY created_at DESC LIMIT 15")
+        rows = await cur.fetchall()
+    if not rows:
+        text = "📋 No redeem codes yet."
+    else:
+        lines = ["📋 <b>Redeem Codes</b>\n"]
+        for r in rows:
+            lines.append(
+                f"🎟 <code>{r['code']}</code> — {r['coin_reward']}🪙 | "
+                f"{r['used_count']}/{r['usage_limit'] or '∞'} used | {r['status']}"
+            )
+        text = "\n".join(lines)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button("ad:redeemmgr"))
+
+
+async def cb_rm_delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "🗑 Enter the exact redeem code to delete:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="rm:delcancel", style="primary")]]),
+    )
+    return RM_DELETE
+
+
+async def conv_rm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip().upper()
+    async with db_conn() as db:
+        cur = await db.execute("SELECT 1 FROM redeems WHERE code=?", (code,))
+        if not await cur.fetchone():
+            await update.message.reply_text("❌ No such code found. Please check and try again, or /cancel.")
+            return RM_DELETE
+        await db.execute("DELETE FROM redeems WHERE code=?", (code,))
+        await db.execute("DELETE FROM redeem_uses WHERE code=?", (code,))
+        await db.commit()
+    await update.message.reply_text(f"✅ Deleted code: <code>{html.escape(code)}</code>", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def cb_rm_delete_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+async def cb_rm_delete_all_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_owner(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM redeems")
+        count = (await cur.fetchone())[0]
+    if count == 0:
+        await query.edit_message_text("No redeem codes to delete.", reply_markup=back_button("ad:redeemmgr"))
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Yes, Delete ALL", callback_data="rm:delallconfirm", style="primary"),
+         InlineKeyboardButton("❌ No", callback_data="ad:redeemmgr", style="primary")],
+    ])
+    await query.edit_message_text(
+        f"⚠️ <b>Delete ALL {count} Redeem Codes?</b>\n\nThis cannot be undone.",
+        parse_mode=ParseMode.HTML, reply_markup=kb,
+    )
+
+
+async def cb_rm_delete_all_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_owner(update):
+        return
+    query = update.callback_query
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM redeems")
+        count = (await cur.fetchone())[0]
+        await db.execute("DELETE FROM redeems")
+        await db.execute("DELETE FROM redeem_uses")
+        await db.commit()
+    await query.answer("🗑 Deleted all codes")
+    await query.edit_message_text(f"🗑 <b>Deleted {count} redeem codes.</b>", parse_mode=ParseMode.HTML)
+    await log_admin_action(context.bot, update.effective_user.id, f"🗑 Deleted ALL {count} redeem codes")
+
+
+
+async def cb_admin_usermgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await update.effective_message.reply_text("🔍 Enter User ID or @username to search:")
+    return UM_SEARCH
+
+
+async def conv_um_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        if text.isdigit():
+            cur = await db.execute("SELECT * FROM users WHERE user_id=?", (int(text),))
+        else:
+            uname = text.lstrip("@")
+            cur = await db.execute("SELECT * FROM users WHERE username=?", (uname,))
+        row = await cur.fetchone()
+
+    if not row:
+        await update.message.reply_text("❌ User not found.")
+        return ConversationHandler.END
+
+    await send_user_profile(update.message, row["user_id"])
+    return ConversationHandler.END
+
+
+async def send_user_profile(message_or_query, target_id: int, edit: bool = False):
+    row = await get_user_row(target_id)
+    if not row:
+        return
+    balance = await get_balance(target_id)
+    async with db_conn() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (target_id,))
+        refs = (await cur.fetchone())[0]
+    premium = "⭐ Active" if await is_premium_active(target_id) else "❌ None"
+    banned = "🚫 Banned" if row["is_banned"] else "✅ Active"
+
+    text = (
+        f"👤 <b>User Profile</b>\n\n"
+        f"🆔 ID: <code>{target_id}</code>\n"
+        f"📛 Name: {html.escape(row['first_name'] or '—')}\n"
+        f"🔗 Username: @{html.escape(row['username']) if row['username'] else '—'}\n"
+        f"📅 Joined: {fmt_date(row['join_date'])}\n"
+        f"🪙 Wallet: {balance}\n"
+        f"👥 Referrals: {refs}\n"
+        f"⭐ Premium: {premium}\n"
+        f"🔒 Status: {banned}"
+    )
+    is_owner = message_or_query.from_user.id == OWNER_ID
+    rows = [
+        [InlineKeyboardButton("➕ Add Coins", callback_data=f"um:addc:{target_id}", style="primary"),
+         InlineKeyboardButton("➖ Remove Coins", callback_data=f"um:remc:{target_id}", style="primary")],
+    ]
+    if is_owner:
+        rows.append([InlineKeyboardButton("🚫 Ban", callback_data=f"um:ban:{target_id}", style="primary"),
+                     InlineKeyboardButton("✅ Unban", callback_data=f"um:unban:{target_id}", style="primary")])
+    rows.append([InlineKeyboardButton("👑 Give Premium", callback_data=f"um:givep:{target_id}", style="primary"),
+                 InlineKeyboardButton("❌ Remove Premium", callback_data=f"um:remp:{target_id}", style="primary")])
+    kb = InlineKeyboardMarkup(rows)
+    if hasattr(message_or_query, "edit_message_text") and edit:
+        await message_or_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await message_or_query.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+
+async def cb_admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+    await send_all_users_list(update, context, page=0)
+
+
+async def send_all_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
+    per_page = 10
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        total = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+        cur = await db.execute(
+            "SELECT user_id, username, first_name, is_banned FROM users "
+            "ORDER BY join_date DESC LIMIT ? OFFSET ?",
+            (per_page, page * per_page),
+        )
+        rows = await cur.fetchall()
+
+    text = f"👤 <b>All Users</b>\n\n👥 Total Registered: <b>{total}</b>\n\nTap a user to view or manage their profile:"
+    buttons = []
+    for r in rows:
+        label = f"@{r['username']}" if r["username"] else (r["first_name"] or f"ID {r['user_id']}")
+        tag = "🚫 " if r["is_banned"] else "👤 "
+        buttons.append([InlineKeyboardButton(f"{tag}{label}", callback_data=f"au:view:{r['user_id']}:{page}", style="primary")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"au:list:{page-1}", style="primary"))
+    if (page + 1) * per_page < total:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"au:list:{page+1}", style="primary"))
+    if nav:
+        buttons.append(nav)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_au_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    await send_all_users_list(update, context, page)
+
+
+async def cb_au_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    target_id = int(query.data.split(":")[2])
+    await send_user_profile(query, target_id, edit=True)
+
+
+async def cb_um_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_owner(update):
+        return
+    query = update.callback_query
+    action, target_id = query.data.split(":")[1], int(query.data.split(":")[2])
+    banned = 1 if action == "ban" else 0
+    async with db_conn() as db:
+        await db.execute("UPDATE users SET is_banned=? WHERE user_id=?", (banned, target_id))
+        await db.commit()
+    await query.answer("✅ Updated")
+    await log_admin_action(context.bot, update.effective_user.id, f"{'🚫 Banned' if banned else '✅ Unbanned'} user {target_id}")
+    await send_user_profile(query, target_id, edit=True)
+
+
+async def cb_um_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    action, target_id = query.data.split(":")[1], int(query.data.split(":")[2])
+    if action == "remp":
+        await remove_premium(target_id)
+        await query.answer("✅ Premium removed")
+        await send_user_profile(query, target_id, edit=True)
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("7 Days", callback_data=f"um:pset:{target_id}:7", style="primary"),
+         InlineKeyboardButton("30 Days", callback_data=f"um:pset:{target_id}:30", style="primary")],
+        [InlineKeyboardButton("90 Days", callback_data=f"um:pset:{target_id}:90", style="primary"),
+         InlineKeyboardButton("Lifetime", callback_data=f"um:pset:{target_id}:0", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"um:back:{target_id}", style="primary")],
+    ])
+    await query.answer()
+    await query.edit_message_text("👑 Select Premium Duration:", reply_markup=kb)
+
+
+async def cb_um_pset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, _, target_id, days = query.data.split(":")
+    target_id, days = int(target_id), int(days)
+    await grant_premium(target_id, None if days == 0 else days, update.effective_user.id)
+    await query.answer("✅ Premium granted")
+    try:
+        await context.bot.send_message(
+            target_id,
+            f"👑 <b>You've been granted Premium!</b>\nDuration: {'Lifetime' if days==0 else f'{days} days'}",
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError:
+        pass
+    await log_admin_action(
+        context.bot, update.effective_user.id,
+        f"👑 Granted {'Lifetime' if days == 0 else f'{days} days'} Premium to user {target_id}"
+    )
+    await send_user_profile(query, target_id, edit=True)
+
+
+async def cb_um_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    target_id = int(query.data.split(":")[2])
+    await query.answer()
+    await send_user_profile(query, target_id, edit=True)
+
+
+async def cb_um_coins_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    action, target_id = query.data.split(":")[1], int(query.data.split(":")[2])
+    context.user_data["um_action"] = "add" if action == "addc" else "remove"
+    context.user_data["um_target"] = target_id
+    await query.message.reply_text("🪙 Enter the coin amount:")
+    return UM_AMOUNT
+
+
+async def conv_um_coins_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await update.message.reply_text("❌ Please enter a valid positive number.")
+        return UM_AMOUNT
+    amount = int(text)
+    target_id = context.user_data.pop("um_target")
+    action = context.user_data.pop("um_action")
+    if action == "add":
+        await add_coins(target_id, amount, "admin_gift", "Admin added coins via User Manager")
+        await update.message.reply_text(f"✅ Added {amount} coins to user {target_id}.")
+    else:
+        ok = await remove_coins(target_id, amount, "admin_deduct", "Admin removed coins via User Manager")
+        await update.message.reply_text(
+            f"✅ Removed {amount} coins from user {target_id}." if ok else "❌ Insufficient balance to remove that amount."
+        )
+    return ConversationHandler.END
+
+
+
+async def cb_admin_premiummgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM premium ORDER BY granted_at DESC LIMIT 20")
+        rows = await cur.fetchall()
+    if not rows:
+        text = "👑 <b>Premium Manager</b>\n\nNo premium users yet.\n\nUse 👥 User Manager to grant premium to a specific user."
+    else:
+        lines = ["👑 <b>Premium Users</b>\n"]
+        for r in rows:
+            status = "Lifetime" if r["is_lifetime"] else fmt_date(r["expiry_date"])
+            lines.append(f"🆔 <code>{r['user_id']}</code> — {status}")
+        text = "\n".join(lines)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button("ad:home"))
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+
+async def cb_admin_adminmgr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM admins ORDER BY added_date")
+        rows = await cur.fetchall()
+
+    lines = ["🛡 <b>Admin Manager</b>\n"]
+    lines.append(f"👑 Owner: <code>{OWNER_ID}</code>")
+    for r in rows:
+        if r["user_id"] == OWNER_ID:
+            continue
+        u = await get_user_row(r["user_id"])
+        label = f"@{u['username']}" if u and u["username"] else (u["first_name"] if u else "Unknown")
+        role_tag = "🥇 Senior" if r["role"] == "senior" else "🥈 Junior"
+        lines.append(f"🛡 <code>{r['user_id']}</code> — {html.escape(label or '—')} ({role_tag})")
+    text = "\n".join(lines)
+
+    buttons = []
+    is_owner = update.effective_user.id == OWNER_ID
+    if is_owner:
+        buttons.append([InlineKeyboardButton("➕ Add Admin", callback_data="am:add", style="primary"),
+                         InlineKeyboardButton("➖ Remove Admin", callback_data="am:remove", style="primary")])
+        buttons.append([InlineKeyboardButton("📜 Action Log", callback_data="am:log:0", style="primary")])
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")])
+    kb = InlineKeyboardMarkup(buttons)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_am_log_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not await require_owner(update):
+        return
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    per_page = 10
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM admin_logs ORDER BY log_id DESC LIMIT ? OFFSET ?", (per_page, page * per_page)
+        )
+        rows = await cur.fetchall()
+
+    if not rows and page == 0:
+        text = "📜 <b>Admin Action Log</b>\n\nNo actions recorded yet."
+    else:
+        lines = ["📜 <b>Admin Action Log</b>\n"]
+        for r in rows:
+            u = await get_user_row(r["actor_id"])
+            label = f"@{u['username']}" if u and u["username"] else str(r["actor_id"])
+            lines.append(f"👤 {html.escape(label)} — {r['action_text']}\n<i>{fmt_date(r['timestamp'])}</i>")
+        text = "\n\n".join(lines)
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"am:log:{page-1}", style="primary"))
+    if len(rows) == per_page:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"am:log:{page+1}", style="primary"))
+    buttons = [nav] if nav else []
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:adminmgr", style="primary")])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_am_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 Only the owner can add admins.", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    await query.message.reply_text("👤 Send the User ID or @username to promote to admin:")
+    return AM_ADD_USER
+
+
+async def conv_am_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    target_id = None
+    async with db_conn() as db:
+        if text.startswith("@"):
+            cur = await db.execute("SELECT user_id FROM users WHERE username=?", (text.lstrip("@"),))
+            row = await cur.fetchone()
+            if row:
+                target_id = row[0]
+        elif text.isdigit():
+            target_id = int(text)
+
+    if target_id is None:
+        await update.message.reply_text(
+            "❌ Couldn't find that user. They need to have started the bot at least once. Try again, or /cancel."
+        )
+        return AM_ADD_USER
+
+    context.user_data["am_target_id"] = target_id
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🥇 Senior Admin", callback_data="am:role:senior", style="primary"),
+         InlineKeyboardButton("🥈 Junior Admin", callback_data="am:role:junior", style="primary")],
+    ])
+    await update.message.reply_text(
+        "🛡 Choose their role:\n\n"
+        "🥇 <b>Senior</b> — their actions are only reported to you (the Owner).\n"
+        "🥈 <b>Junior</b> — their actions are reported to you AND all Senior admins.",
+        parse_mode=ParseMode.HTML, reply_markup=kb,
+    )
+    return AM_ADD_ROLE
+
+
+async def cb_am_add_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    role = query.data.split(":")[2]
+    target_id = context.user_data.pop("am_target_id", None)
+    if target_id is None:
+        await query.message.reply_text("❌ Something went wrong — please start again.")
+        return ConversationHandler.END
+
+    async with db_conn() as db:
+        await db.execute(
+            "INSERT INTO admins (user_id, added_date, role) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET role=excluded.role",
+            (target_id, datetime.utcnow().isoformat(), role),
+        )
+        await db.commit()
+
+    role_label = "Senior Admin 🥇" if role == "senior" else "Junior Admin 🥈"
+    await query.message.reply_text(
+        f"✅ User <code>{target_id}</code> is now a <b>{role_label}</b>.", parse_mode=ParseMode.HTML
+    )
+    try:
+        await context.bot.send_message(
+            target_id, f"🛡 <b>You've been made a {role_label} of this bot!</b>", parse_mode=ParseMode.HTML
+        )
+    except TelegramError:
+        pass
+    return ConversationHandler.END
+
+
+async def cb_am_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 Only the owner can remove admins.", show_alert=True)
+        return
+    await query.answer()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM admins WHERE user_id != ? ORDER BY added_date", (OWNER_ID,))
+        rows = await cur.fetchall()
+    if not rows:
+        await query.edit_message_text("No sub-admins to remove.", reply_markup=back_button("ad:adminmgr"))
+        return
+    buttons = []
+    for r in rows:
+        u = await get_user_row(r["user_id"])
+        label = f"@{u['username']}" if u and u["username"] else str(r["user_id"])
+        buttons.append([InlineKeyboardButton(f"➖ {label}", callback_data=f"am:rm:{r['user_id']}", style="primary")])
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:adminmgr", style="primary")])
+    await query.edit_message_text("➖ Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_am_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 Only the owner can remove admins.", show_alert=True)
+        return
+    target_id = int(query.data.split(":")[2])
+    if target_id == OWNER_ID:
+        await query.answer("🚫 Can't remove the owner.", show_alert=True)
+        return
+    async with db_conn() as db:
+        await db.execute("DELETE FROM admins WHERE user_id=?", (target_id,))
+        await db.commit()
+    await query.answer("✅ Removed")
+    await cb_am_remove_menu(update, context)
+
+
+
+async def cb_admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await update.effective_message.reply_text(
+        "📢 Send the message you want to broadcast (text, photo, video, animation, sticker, document, voice, or audio).\n\n"
+        "Send /cancel to abort."
+    )
+    return BR_CONTENT
+
+
+async def conv_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    async with db_conn() as db:
+        cur = await db.execute("SELECT user_id FROM users")
+        all_users = [r[0] for r in await cur.fetchall()]
+
+    status_msg = await msg.reply_text(f"📢 Broadcasting to {len(all_users)} users...")
+    counters = {"done": 0, "failed": 0}
+    counters_lock = asyncio.Lock()
+
+    async def send_one(uid: int) -> None:
+        await TELEGRAM_SEND_LIMITER.acquire()
+        try:
+            await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
+            async with counters_lock:
+                counters["done"] += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 0.5)
+            try:
+                await context.bot.copy_message(chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id)
+                async with counters_lock:
+                    counters["done"] += 1
+            except TelegramError:
+                async with counters_lock:
+                    counters["failed"] += 1
+        except TelegramError:
+            async with counters_lock:
+                counters["failed"] += 1
+
+    await asyncio.gather(*(send_one(uid) for uid in all_users))
+
+    await status_msg.edit_text(
+        f"✅ <b>Broadcast Complete</b>\n\n✅ Sent: {counters['done']}\n❌ Failed: {counters['failed']}",
+        parse_mode=ParseMode.HTML,
+    )
+    await log_admin_action(
+        context.bot, update.effective_user.id,
+        f"📢 Sent a broadcast — reached {counters['done']}, failed {counters['failed']}"
+    )
+    return ConversationHandler.END
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    admin = await is_admin(update.effective_user.id)
+    await update.message.reply_text("❌ Cancelled.", reply_markup=user_reply_keyboard(admin))
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+
+async def cb_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+
+    async with db_conn() as db:
+        total_users = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+        active_users = (await (await db.execute(
+            "SELECT COUNT(*) FROM users WHERE last_seen > ?",
+            ((datetime.utcnow() - timedelta(days=7)).isoformat(),)
+        )).fetchone())[0]
+        premium_users = (await (await db.execute(
+            "SELECT COUNT(*) FROM premium WHERE is_lifetime=1 OR expiry_date > ?",
+            (datetime.utcnow().isoformat(),)
+        )).fetchone())[0]
+        total_files = (await (await db.execute("SELECT COUNT(*) FROM files WHERE is_deleted=0")).fetchone())[0]
+        total_downloads = (await (await db.execute("SELECT COUNT(*) FROM downloads")).fetchone())[0]
+        coins_distributed = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE amount > 0"
+        )).fetchone())[0]
+        redeem_count = (await (await db.execute("SELECT COUNT(*) FROM redeem_uses")).fetchone())[0]
+        referral_count = (await (await db.execute("SELECT COUNT(*) FROM referrals")).fetchone())[0]
+        revenue_stars = (await (await db.execute(
+            "SELECT COALESCE(SUM(stars),0) FROM payments WHERE status='accepted'"
+        )).fetchone())[0]
+        pending_payments = (await (await db.execute(
+            "SELECT COUNT(*) FROM payments WHERE status='pending'"
+        )).fetchone())[0]
+
+    text = (
+        "📊 <b>Statistics</b>\n\n"
+        f"👥 Total Users: <b>{total_users}</b>\n"
+        f"🟢 Active (7d): <b>{active_users}</b>\n"
+        f"⭐ Premium Users: <b>{premium_users}</b>\n"
+        f"📁 Total Files: <b>{total_files}</b>\n"
+        f"⬇ Downloads: <b>{total_downloads}</b>\n"
+        f"🪙 Coins Distributed: <b>{coins_distributed}</b>\n"
+        f"🎟 Redeem Count: <b>{redeem_count}</b>\n"
+        f"🚀 Referral Count: <b>{referral_count}</b>\n"
+        f"💰 Revenue: <b>{revenue_stars} ⭐</b>\n"
+        f"⏳ Pending Payments: <b>{pending_payments}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 Top Downloaded Files", callback_data="stats:topfiles", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")],
+    ])
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_stats_top_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not await is_admin(update.effective_user.id):
+        await query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        return
+    await query.answer()
+    async with db_conn() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT file_name, downloads_count, price FROM files WHERE is_deleted=0 "
+            "ORDER BY downloads_count DESC LIMIT 10"
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        text = "📈 <b>Top Downloaded Files</b>\n\nNo files yet."
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        lines = ["📈 <b>Top 10 Downloaded Files</b>\n"]
+        for i, r in enumerate(rows):
+            rank = medals[i] if i < 3 else f"{i+1}."
+            tag = "FREE" if r["price"] == 0 else f"{r['price']} coins"
+            lines.append(f"{rank} {html.escape(r['file_name'])} — <b>{r['downloads_count']}</b> downloads ({tag})")
+        text = "\n".join(lines)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_button("ad:stats"))
+
+
+
+async def cb_admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        if update.callback_query:
+            await update.callback_query.answer(ADMIN_ONLY_MSG, show_alert=True)
+        else:
+            await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    current = await get_setting("maintenance", "0")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Enable", callback_data="mt:on", style="primary"),
+         InlineKeyboardButton("❌ Disable", callback_data="mt:off", style="primary")],
+        [InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")],
+    ])
+    status = "🚧 ENABLED" if current == "1" else "✅ DISABLED"
+    text = f"🛠 <b>Maintenance Mode</b>\n\nCurrent status: <b>{status}</b>"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def cb_mt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    val = "1" if query.data == "mt:on" else "0"
+    await set_setting("maintenance", val)
+    await query.answer("✅ Updated")
+    await log_admin_action(context.bot, update.effective_user.id, f"🛠 Maintenance mode turned {'ON' if val == '1' else 'OFF'}")
+    await cb_admin_maintenance(update, context)
+
+
+
+SETTINGS_FIELDS = {
+    "referral_reward": "🚀 Referral Reward (coins)",
+    "daily_bonus": "🎁 Daily Bonus (coins)",
+    "premium_daily_bonus": "👑 Premium Daily Bonus (coins)",
+    "coin_packages": "🪙 Coin Packages (JSON list)",
+    "premium_pricing": "👑 Premium Pricing (JSON list)",
+    "coin_rate_bdt": "💵 Coins per 1 Taka",
+    "bdt_payment_details": "💵 BDT Payment Details (bKash/Nagad)",
+    "spin_settings": "🎰 Daily Spin Settings (JSON)",
+    "mystery_box_pricing": "🎁 Mystery Box Pricing (JSON)",
+    "referral_milestones": "🚀 Referral Milestone Rewards (JSON)",
+    "streak_rewards": "🔥 Login Streak Rewards (JSON)",
+    "star_rate": "⭐ Star Rate",
+    "support_username": "💬 Support Username",
+    "payment_username": "💰 Payment Username (Stars)",
+    "bot_name": "🏷 Bot Name",
+    "force_join": "📡 Force Join (1/0)",
+}
+
+
+async def cb_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_owner(update):
+        return
+    buttons = [[InlineKeyboardButton(label, callback_data=f"set:{key}", style="primary")] for key, label in SETTINGS_FIELDS.items()]
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="ad:home", style="primary")])
+    text = "⚙ <b>Settings</b>\n\nSelect a setting to edit:"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cb_settings_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await require_owner(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    key = query.data.split(":")[1]
+    current = await get_setting(key, "")
+    context.user_data["st_key"] = key
+    await query.message.reply_text(
+        f"✏️ Current value of <b>{SETTINGS_FIELDS.get(key, key)}</b>:\n<code>{html.escape(current)}</code>\n\n"
+        f"Send the new value:",
+        parse_mode=ParseMode.HTML,
+    )
+    return ST_VALUE
+
+
+async def conv_settings_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    key = context.user_data.pop("st_key")
+    value = update.message.text.strip()
+    if key == "coin_packages":
+        try:
+            parsed = json.loads(value)
+            assert isinstance(parsed, list)
+        except Exception:
+            await update.message.reply_text(
+                '❌ Invalid JSON. Example: [{"coins": 100, "stars": 3}, {"coins": 500, "stars": 15}]'
+            )
+            context.user_data["st_key"] = key
+            return ST_VALUE
+    await set_setting(key, value)
+    await update.message.reply_text("✅ Setting updated successfully.")
+    return ConversationHandler.END
+
+
+
+async def handle_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(ADMIN_ONLY_MSG)
+        return
+    is_owner = update.effective_user.id == OWNER_ID
+    await update.effective_message.reply_text(
+        f"👑 <b>Admin Panel</b> <i>({BOT_VERSION})</i>\n\nAll admin controls are now available on your keyboard below.\n"
+        "Tap <b>⬅️ Back to Main</b> anytime to return to the normal menu.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_reply_keyboard(is_owner),
+    )
+
+
+async def handle_admin_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(
+        "🏠 <b>Main Menu</b>", parse_mode=ParseMode.HTML, reply_markup=user_reply_keyboard(True)
+    )
+
+
+async def cb_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("👑 <b>Admin Panel</b>\n\nSelect an option below:", parse_mode=ParseMode.HTML, reply_markup=admin_panel_keyboard())
+
+
+
+async def job_expire_premium(context: ContextTypes.DEFAULT_TYPE) -> None:
+    async with db_conn() as db:
+        await db.execute(
+            "DELETE FROM premium WHERE is_lifetime=0 AND expiry_date IS NOT NULL AND expiry_date < ?",
+            (datetime.utcnow().isoformat(),),
+        )
+        await db.commit()
+
+
+async def job_expire_redeem_codes(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto-deletes redeem codes past their expiry_date, along with their
+    usage records, so admins never have to clean these up manually."""
+    now = datetime.utcnow().isoformat()
+    async with db_conn() as db:
+        cur = await db.execute(
+            "SELECT code FROM redeems WHERE expiry_date IS NOT NULL AND expiry_date < ?", (now,)
+        )
+        expired = [r[0] for r in await cur.fetchall()]
+        if expired:
+            placeholders = ",".join("?" * len(expired))
+            await db.execute(f"DELETE FROM redeems WHERE code IN ({placeholders})", expired)
+            await db.execute(f"DELETE FROM redeem_uses WHERE code IN ({placeholders})", expired)
+            await db.commit()
+            log.info("Auto-deleted %d expired redeem code(s)", len(expired))
+
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error("Exception while handling update:", exc_info=context.error)
+
+
+
+TEXT_ROUTES = {
+    "📁 Buy Files": handle_buy_files,
+    "💎 My Wallet": handle_my_wallet,
+    "🎰 Daily Spin": handle_daily_spin,
+    "🎁 Mystery Box": handle_mystery_box,
+    "🎫 Support Ticket": handle_support_ticket_prompt,
+    "🎁 Daily Bonus": handle_daily_bonus,
+    "🚀 Invite Friends": handle_invite_friends,
+    "📊 My Stats": handle_my_stats,
+    "🏆 Leaderboard": handle_leaderboard,
+    "💬 Support": handle_support,
+    "👑 Admin Panel": handle_admin_panel,
+    "📂 Manage Files": cb_admin_managefiles,
+    "💰 Wallet Manager": cb_admin_walletmgr,
+    "🎟 Redeem Manager": cb_admin_redeemmgr,
+    "📡 Force Channels": cb_admin_fcmgr,
+    "👤 All Users": cb_admin_all_users,
+    "👑 Premium Manager": cb_admin_premiummgr,
+    "🛡 Admin Manager": cb_admin_adminmgr,
+    "📋 Admin List": cb_admin_adminmgr,
+    "📊 Statistics": cb_admin_stats,
+    "🛠 Maintenance": cb_admin_maintenance,
+    "⚙ Settings": cb_admin_settings,
+    "⬅️ Back to Main": handle_admin_back_to_main,
+}
+
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user is None or update.message is None or update.message.text is None:
+        return
+    if context.user_data is not None and context.user_data.get("awaiting_reject_reason"):
+        await handle_reject_reason(update, context)
+        return
+    text = update.message.text
+    handler = TEXT_ROUTES.get(text)
+    if handler:
+        await handler(update, context)
+
+
+
+def build_application() -> Application:
+    concurrent_updates = int(os.environ.get("CONCURRENT_UPDATES", "512"))
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(concurrent_updates)
+        .request(HTTPXRequest(
+            connection_pool_size=concurrent_updates,
+            pool_timeout=20.0,
+            connect_timeout=15.0,
+            read_timeout=20.0,
+            write_timeout=20.0,
+        ))
+        .get_updates_request(HTTPXRequest(connection_pool_size=64, pool_timeout=20.0))
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
+    app.add_handler(MessageHandler(filters.ALL, group_restriction_guard), group=-2)
+    app.add_handler(CallbackQueryHandler(group_restriction_guard), group=-2)
+
+    app.add_handler(MessageHandler(filters.ALL, flood_guard), group=-1)
+    app.add_handler(CallbackQueryHandler(flood_guard), group=-1)
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+
+    app.add_handler(CallbackQueryHandler(cb_verify_join, pattern="^verify_join$"))
+
+    app.add_handler(CallbackQueryHandler(cb_wallet_home, pattern="^wallet:home$"))
+    app.add_handler(CallbackQueryHandler(cb_wallet_tx, pattern="^wallet:tx:"))
+    app.add_handler(CallbackQueryHandler(cb_wallet_buy_premium, pattern="^wallet:buypremium$"))
+    app.add_handler(CallbackQueryHandler(handle_buy_coins_bdt, pattern="^wallet:buybdt$"))
+
+    app.add_handler(CallbackQueryHandler(cb_spin_go, pattern="^spin:go$"))
+    app.add_handler(CallbackQueryHandler(cb_mystery_open, pattern=r"^mystery:open:\w+:\d+$"))
+
+    ticket_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🎫 Support Ticket$"), handle_support_ticket_prompt)],
+        states={
+            TK_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_ticket_subject)],
+            TK_BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_ticket_body)],
+        },
+        fallbacks=[CallbackQueryHandler(cb_ticket_cancel, pattern="^ticket:cancel$"), CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(ticket_conv)
+
+    ticket_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_ticket_reply_start, pattern=r"^ticket:reply:\d+$")],
+        states={TK_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_ticket_reply)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(ticket_reply_conv)
+
+    ticket_user_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_ticket_user_reply_start, pattern=r"^ticket:ureply:\d+$")],
+        states={TK_USER_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_ticket_user_reply)]},
+        fallbacks=[CallbackQueryHandler(cb_ticket_cancel, pattern="^ticket:cancel$"), CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(ticket_user_reply_conv)
+    app.add_handler(CallbackQueryHandler(cb_ticket_close, pattern=r"^ticket:close:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_premium_purchase, pattern=r"^premium:buy:\d+:\d+$"))
+
+    buycoins_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_buycoins_paid, pattern="^buycoins:paid$")],
+        states={
+            BC_STARS: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_buycoins_stars)],
+            BC_SCREENSHOT: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, conv_buycoins_screenshot)],
+        },
+        fallbacks=[CallbackQueryHandler(cb_buycoins_cancel, pattern="^buycoins:cancel$"), CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(CallbackQueryHandler(cb_buycoins_start, pattern="^wallet:buycoins$"))
+    app.add_handler(buycoins_conv)
+    app.add_handler(CallbackQueryHandler(cb_payment_accept, pattern=r"^pay:accept:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_payment_reject, pattern=r"^pay:reject:\d+$"))
+
+    buybdt_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_buybdt_paid, pattern="^buybdt:paid$")],
+        states={
+            BDT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_buybdt_amount)],
+            BDT_PROOF: [MessageHandler((filters.PHOTO | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND, conv_buybdt_proof)],
+        },
+        fallbacks=[CallbackQueryHandler(cb_buybdt_cancel, pattern="^buybdt:cancel$"), CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(buybdt_conv)
+
+    app.add_handler(MessageHandler(filters.Regex("^🎟️ Redeem Code$"), handle_redeem_prompt))
+    app.add_handler(CallbackQueryHandler(cb_redeem_cancel, pattern="^redeem:cancel$"))
+
+    redeem_enter_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_redeem_enter_start, pattern="^redeem:enter$")],
+        states={RD_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_redeem_code)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(redeem_enter_conv)
+
+    redeem_gift_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_redeem_gift_start, pattern="^redeem:gift$")],
+        states={GC_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_gift_amount)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(redeem_gift_conv)
+
+    app.add_handler(CallbackQueryHandler(cb_files_list, pattern=r"^files:list:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_file_view, pattern=r"^file:view:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_file_buy, pattern=r"^file:buy:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_file_download, pattern=r"^file:dl:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_my_purchases, pattern=r"^purchases:\d+$"))
+
+    app.add_handler(CallbackQueryHandler(cb_admin_home, pattern="^ad:home$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_managefiles, pattern="^ad:managefiles$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_walletmgr, pattern="^ad:walletmgr$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_redeemmgr, pattern="^ad:redeemmgr$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_fcmgr, pattern="^ad:fcmgr$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_premiummgr, pattern="^ad:premiummgr$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_adminmgr, pattern="^ad:adminmgr$"))
+    app.add_handler(CallbackQueryHandler(cb_am_remove_menu, pattern="^am:remove$"))
+    app.add_handler(CallbackQueryHandler(cb_am_log_view, pattern=r"^am:log:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_am_remove_confirm, pattern=r"^am:rm:\d+$"))
+
+    am_add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_am_add_start, pattern="^am:add$")],
+        states={
+            AM_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_am_add_user)],
+            AM_ADD_ROLE: [CallbackQueryHandler(cb_am_add_role, pattern=r"^am:role:(senior|junior)$")],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(am_add_conv)
+    app.add_handler(CallbackQueryHandler(cb_admin_stats, pattern="^ad:stats$"))
+    app.add_handler(CallbackQueryHandler(cb_stats_top_files, pattern="^stats:topfiles$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_maintenance, pattern="^ad:maintenance$"))
+    app.add_handler(CallbackQueryHandler(cb_mt_toggle, pattern="^mt:(on|off)$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_settings, pattern="^ad:settings$"))
+
+    upload_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_admin_upload_start, pattern="^ad:upload$"),
+            MessageHandler(filters.Regex("^📤 Upload File$"), cb_admin_upload_start),
+        ],
+        states={
+            UP_FILE: [MessageHandler(
+                (filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.PHOTO | filters.VOICE | filters.ANIMATION) & ~filters.COMMAND,
+                conv_upload_file
+            )],
+            UP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_upload_name)],
+            UP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_upload_desc)],
+            UP_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_upload_price)],
+            UP_PREVIEW: [
+                CallbackQueryHandler(cb_upload_publish, pattern="^up:publish$"),
+                CallbackQueryHandler(cb_upload_edit, pattern="^up:edit$"),
+                CallbackQueryHandler(cb_upload_cancel, pattern="^up:cancel$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(upload_conv)
+
+    app.add_handler(CallbackQueryHandler(cb_mf_list, pattern=r"^mf:list:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_mf_view, pattern=r"^mf:view:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_mf_delete, pattern=r"^mf:delete:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_mf_delete_confirm, pattern=r"^mf:delconfirm:\d+$"))
+
+    edit_field_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_mf_edit_field, pattern=r"^mf:(ename|edesc|eprice|etier):\d+$")],
+        states={EF_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_edit_field_value)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(edit_field_conv)
+
+    fc_add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_fc_add_start, pattern="^fc:add$")],
+        states={
+            FC_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_fc_add)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(fc_add_conv)
+    app.add_handler(CallbackQueryHandler(cb_fc_list, pattern="^fc:list$"))
+    app.add_handler(CallbackQueryHandler(cb_fc_remove_menu, pattern="^fc:remove$"))
+    app.add_handler(CallbackQueryHandler(cb_fc_remove_confirm, pattern=r"^fc:rm:\d+$"))
+
+    wm_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_wm_action_start, pattern="^wm:(add|remove|reset|setbal)$")],
+        states={
+            UM_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_wm_user_id)],
+            UM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_wm_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(wm_conv)
+    app.add_handler(CallbackQueryHandler(cb_wm_history, pattern="^wm:history$"))
+
+    wb_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_wm_bulk_start, pattern="^wm:bulk$")],
+        states={
+            WB_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_wm_bulk_ids)],
+            WB_ACTION: [
+                CallbackQueryHandler(cb_wb_action_coins, pattern="^wb:(add|remove)$"),
+                CallbackQueryHandler(cb_wb_action_ban, pattern="^wb:(ban|unban)$"),
+                CallbackQueryHandler(cb_wb_action_premium_menu, pattern="^wb:premium$"),
+                CallbackQueryHandler(cb_wb_cancel, pattern="^wb:cancel$"),
+            ],
+            WB_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_wm_bulk_amount)],
+            WB_PREMIUM: [CallbackQueryHandler(cb_wb_action_premium_set, pattern=r"^wb:pset:\d+$")],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(wb_conv)
+
+    app.add_handler(CallbackQueryHandler(cb_pending_payments_list, pattern=r"^pp:list:\d+$"))
+
+    rm_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_rm_create_start, pattern="^rm:create$")],
+        states={
+            RM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_code)],
+            RM_COINS: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_coins)],
+            RM_PREMIUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_premium)],
+            RM_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_limit)],
+            RM_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_expiry)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(rm_conv)
+    app.add_handler(CallbackQueryHandler(cb_rm_list, pattern="^rm:list$"))
+    app.add_handler(CallbackQueryHandler(cb_rm_delete_all_confirm, pattern="^rm:delall$"))
+    app.add_handler(CallbackQueryHandler(cb_rm_delete_all_execute, pattern="^rm:delallconfirm$"))
+
+    rm_delete_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_rm_delete_start, pattern="^rm:delstart$")],
+        states={RM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_rm_delete)]},
+        fallbacks=[CallbackQueryHandler(cb_rm_delete_cancel, pattern="^rm:delcancel$"), CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(rm_delete_conv)
+
+    um_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_admin_usermgr, pattern="^ad:usermgr$"),
+            MessageHandler(filters.Regex("^👥 User Manager$"), cb_admin_usermgr),
+            CallbackQueryHandler(cb_um_coins_start, pattern=r"^um:(addc|remc):\d+$"),
+        ],
+        states={
+            UM_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_um_search)],
+            UM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_um_coins_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(um_conv)
+    app.add_handler(CallbackQueryHandler(cb_um_ban, pattern=r"^um:(ban|unban):\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_um_premium, pattern=r"^um:(givep|remp):\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_um_pset, pattern=r"^um:pset:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_um_back, pattern=r"^um:back:\d+$"))
+
+    app.add_handler(CallbackQueryHandler(cb_au_list, pattern=r"^au:list:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_au_view, pattern=r"^au:view:\d+:\d+$"))
+
+    broadcast_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_admin_broadcast_start, pattern="^ad:broadcast$"),
+            MessageHandler(filters.Regex("^📢 Broadcast$"), cb_admin_broadcast_start),
+        ],
+        states={BR_CONTENT: [MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Sticker.ALL |
+             filters.Document.ALL | filters.VOICE | filters.AUDIO) & ~filters.COMMAND,
+            conv_broadcast_content
+        )]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(broadcast_conv)
+
+    settings_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cb_settings_field, pattern=r"^set:\w+$")],
+        states={ST_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, conv_settings_value)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        per_message=False,
+    )
+    app.add_handler(settings_conv)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+
+    app.add_handler(CommandHandler("cancel", cmd_cancel), group=1)
+
+    app.add_error_handler(error_handler)
+    return app
+
+
+async def post_init(app: Application) -> None:
+    await init_db()
+    await init_db_pool()
+    if app.job_queue:
+        app.job_queue.run_repeating(job_expire_premium, interval=3600, first=10)
+        app.job_queue.run_repeating(job_expire_redeem_codes, interval=3600, first=15)
+    log.info("Bot initialized and ready.")
+
+
+async def post_shutdown(app: Application) -> None:
+    await close_db_pool()
+
+
+def main() -> None:
+    app = build_application()
+    log.info("Starting FILE STORE BOT 🛍️...")
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
