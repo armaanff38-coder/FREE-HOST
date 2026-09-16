@@ -33,10 +33,10 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuration ---
-TOKEN = '8977235497:AAF6ipl9cffilM8qK5_3nhnHM7BRHKPCoiY'  # <-- Yahan apna Telegram bot token paste karo
-OWNER_ID = int(os.environ.get('OWNER_ID', '7981498656'))
+TOKEN = '8923127283:AAGcE77pK-R0YibTgMZjjSdN3KkRJcnIdb0'  # <-- Yahan apna Telegram bot token paste karo
+OWNER_ID = int(os.environ.get('OWNER_ID', '5462547294'))
 ADMIN_ID = int(os.environ.get('ADMIN_ID', str(OWNER_ID)))
-YOUR_USERNAME = os.environ.get('OWNER_USERNAME', '@ARMAAN_x7x')
+YOUR_USERNAME = os.environ.get('OWNER_USERNAME', '@ARMAAN_x6x')
 if not TOKEN or TOKEN == 'PASTE_YOUR_BOT_TOKEN_HERE':
     raise RuntimeError('Bot token set karo: TOKEN = \'PASTE_YOUR_BOT_TOKEN_HERE\' ko apne token se replace karo.')
 
@@ -2119,7 +2119,7 @@ def _logic_updates_channel(message):
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        primary_inline_button("📢 UPDATE CHANNEL", url="https://t.me/HOSTINGxBOTxUPDATE")
+        primary_inline_button("📢 UPDATE CHANNEL", url="https://t.me/DARKxARMAANxBANNER")
     )
     bot.reply_to(message, stylish_text("📢 Our Channels:"), reply_markup=markup)
 
